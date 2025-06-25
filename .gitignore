@@ -1,0 +1,3 @@
+.next\nnode_modules\nout\n*.pem\n*.key\n*.crt\n.env
+node_modules
+.next
