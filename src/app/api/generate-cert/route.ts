@@ -1,5 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
-import { spawn } from "child_process";
+import { spawn, exec } from "child_process";
+import { promisify } from "util";
+
+const execAsync = promisify(exec);
 
 export async function POST(request: NextRequest): Promise<NextResponse> {
   try {
@@ -22,6 +25,19 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       );
     }
 
+    // Clean up any existing certbot processes and lock files
+    try {
+      await execAsync("sudo pkill -f certbot || true");
+      await execAsync("sudo rm -f /var/lib/letsencrypt/.certbot.lock || true");
+      await execAsync("sudo rm -rf /tmp/certbot-* || true");
+
+      // Wait a moment for cleanup
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+    } catch (cleanupError) {
+      console.log("Cleanup warning:", cleanupError);
+      // Continue anyway
+    }
+
     // Build domains array
     const domains = includeWildcard ? [domain, `*.${domain}`] : [domain];
 
@@ -31,118 +47,129 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       "--manual",
       "--preferred-challenges",
       "dns",
-      "--manual-public-ip-logging-ok",
-      "--dry-run", // Keep dry-run to avoid rate limits during testing
+      "--dry-run", // Keep dry-run for testing
       "--agree-tos",
       "--email",
       email,
       "--server",
       "https://acme-v02.api.letsencrypt.org/directory",
-      "--non-interactive", // Add this to avoid hanging
-      "--force-interactive", // But allow interactive for DNS challenges
+      "--non-interactive",
+      "--cert-name",
+      domain,
       ...domains.flatMap((d) => ["-d", d]),
     ];
 
     console.log("Executing certbot with args:", certbotArgs);
 
-    const process = spawn("sudo", ["certbot", ...certbotArgs], {
+    const certbotProcess = spawn("sudo", ["certbot", ...certbotArgs], {
       stdio: ["pipe", "pipe", "pipe"],
+      env: { ...process.env, DEBIAN_FRONTEND: "noninteractive" },
     });
 
     let output = "";
     let errorOutput = "";
     const dnsRecords: any[] = [];
-    let isWaitingForDNS = false;
-
-    // Send immediate response when DNS challenge is detected
     let responseSent = false;
 
-    process.stdout.on("data", (data) => {
+    certbotProcess.stdout.on("data", (data) => {
       const text = data.toString();
       output += text;
       console.log("Certbot stdout:", text);
 
-      // Enhanced DNS record parsing
+      // Parse DNS records from output
       const lines = text.split("\n");
+
       for (let i = 0; i < lines.length; i++) {
         const line = lines[i].trim();
 
         // Look for DNS challenge instructions
-        if (line.includes("Please deploy a DNS TXT record")) {
-          isWaitingForDNS = true;
+        if (line.includes("Please deploy a DNS TXT record under the name")) {
+          console.log("Found DNS challenge instruction");
 
-          // Parse the DNS record from the output
+          // Look for the record name and value in subsequent lines
           let recordName = "";
           let recordValue = "";
 
-          // Look for the record name in the next few lines
-          for (let j = i + 1; j < Math.min(i + 10, lines.length); j++) {
+          for (let j = i + 1; j < Math.min(i + 15, lines.length); j++) {
             const currentLine = lines[j].trim();
 
-            // Look for _acme-challenge pattern
-            if (currentLine.includes("_acme-challenge.")) {
-              recordName = currentLine.replace(/[^a-zA-Z0-9._-]/g, "");
-              continue;
+            // Record name line (contains _acme-challenge)
+            if (currentLine.includes("_acme-challenge.") && !recordName) {
+              recordName = currentLine.replace(/[^\w\-\.]/g, "");
+              console.log("Found record name:", recordName);
             }
 
-            // Look for the challenge value (usually a long base64-like string)
+            // Record value line (long alphanumeric string)
             if (
-              currentLine &&
-              currentLine.length > 20 &&
-              !currentLine.includes("_acme-challenge") &&
-              !currentLine.includes("Please") &&
-              !currentLine.includes("with the following") &&
-              !currentLine.includes("Press Enter") &&
-              !currentLine.includes("-")
+              !recordValue &&
+              currentLine.length > 30 &&
+              /^[A-Za-z0-9_\-]+$/.test(currentLine) &&
+              !currentLine.includes("_acme-challenge")
             ) {
               recordValue = currentLine;
+              console.log("Found record value:", recordValue);
               break;
             }
           }
 
           if (recordName && recordValue) {
-            const domain = recordName
-              .replace("_acme-challenge.", "")
-              .replace(/\.$/, "");
-            dnsRecords.push({
+            const domain = recordName.replace("_acme-challenge.", "");
+            const dnsRecord = {
               name: recordName,
               type: "TXT",
               value: recordValue,
               domain: domain,
-            });
+            };
 
-            console.log("Parsed DNS record:", {
-              recordName,
-              recordValue,
-              domain,
-            });
+            // Avoid duplicates
+            if (
+              !dnsRecords.find(
+                (r) => r.name === recordName && r.value === recordValue
+              )
+            ) {
+              dnsRecords.push(dnsRecord);
+              console.log("Added DNS record:", dnsRecord);
+            }
           }
-          break;
         }
 
-        // Alternative parsing for wildcard certificates
-        if (line.includes("_acme-challenge") && !line.includes("Please")) {
-          const nameMatch = line.match(/_acme-challenge\.([^\s\n.]+)/);
+        // Alternative parsing pattern
+        if (
+          line.match(/_acme-challenge\.[a-zA-Z0-9\.\-]+/) &&
+          !line.includes("Please")
+        ) {
+          const nameMatch = line.match(/_acme-challenge\.[a-zA-Z0-9\.\-]+/);
           if (nameMatch) {
-            const domain = nameMatch[1];
-            // Look for value in surrounding lines
+            const recordName = nameMatch[0];
+            const domain = recordName.replace("_acme-challenge.", "");
+
+            // Look for value in nearby lines
             for (
-              let k = Math.max(0, i - 3);
-              k < Math.min(i + 3, lines.length);
+              let k = Math.max(0, i - 2);
+              k < Math.min(i + 5, lines.length);
               k++
             ) {
               const valueLine = lines[k].trim();
               if (
-                valueLine &&
-                valueLine.length > 20 &&
+                valueLine.length > 30 &&
+                /^[A-Za-z0-9_\-]+$/.test(valueLine) &&
                 !valueLine.includes("_acme-challenge")
               ) {
-                dnsRecords.push({
-                  name: `_acme-challenge.${domain}`,
+                const dnsRecord = {
+                  name: recordName,
                   type: "TXT",
                   value: valueLine,
                   domain: domain,
-                });
+                };
+
+                if (
+                  !dnsRecords.find(
+                    (r) => r.name === recordName && r.value === valueLine
+                  )
+                ) {
+                  dnsRecords.push(dnsRecord);
+                  console.log("Added DNS record (alt):", dnsRecord);
+                }
                 break;
               }
             }
@@ -150,88 +177,109 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
         }
       }
 
-      // If we found DNS records and haven't sent response yet, send it
+      // Send response when we have DNS records
       if (dnsRecords.length > 0 && !responseSent) {
         responseSent = true;
-        // Kill the process since we have what we need
-        process.kill("SIGTERM");
+        setTimeout(() => certbotProcess.kill("SIGTERM"), 1000);
       }
     });
 
-    process.stderr.on("data", (data) => {
+    certbotProcess.stderr.on("data", (data) => {
       const text = data.toString();
       errorOutput += text;
       console.error("Certbot stderr:", text);
+
+      // Handle specific errors
+      if (text.includes("Another instance of Certbot is already running")) {
+        if (!responseSent) {
+          responseSent = true;
+          certbotProcess.kill("SIGTERM");
+        }
+      }
     });
 
     return new Promise<NextResponse>((resolve) => {
-      // Set a timeout to return DNS records if found
       const timeoutId = setTimeout(() => {
-        if (dnsRecords.length > 0 && !responseSent) {
+        if (!responseSent) {
           responseSent = true;
-          process.kill("SIGTERM");
+          certbotProcess.kill("SIGTERM");
 
-          resolve(
-            NextResponse.json({
-              success: true,
-              message:
-                "DNS verification required. Please add these TXT records to your DNS and then run the server command.",
-              dnsRecords,
-              serverCommand: `sudo certbot certonly --manual --preferred-challenges dns --email ${email} ${domains
-                .map((d) => `-d ${d}`)
-                .join(" ")} --agree-tos`,
-              certificatePath: `/etc/letsencrypt/live/${domain}/`,
-              output,
-              note: "This was a dry-run. Remove --dry-run from the server command to generate actual certificates.",
-              nextSteps: [
-                "1. Add the DNS TXT records shown above to your DNS provider",
-                "2. Wait 5-10 minutes for DNS propagation",
-                "3. Run the server command shown above",
-                "4. When prompted, press Enter to continue verification",
-                "5. Your certificate will be generated and saved",
-              ],
-            })
-          );
+          if (dnsRecords.length > 0) {
+            resolve(
+              NextResponse.json({
+                success: true,
+                message:
+                  "DNS verification required. Add these TXT records to your DNS provider.",
+                dnsRecords,
+                serverCommand: `sudo certbot certonly --manual --preferred-challenges dns --email ${email} ${domains
+                  .map((d) => `-d ${d}`)
+                  .join(" ")} --agree-tos`,
+                certificatePath: `/etc/letsencrypt/live/${domain}/`,
+                output,
+                note: "This was a dry-run. Remove --dry-run from the server command for actual certificates.",
+                nextSteps: [
+                  "1. Add the DNS TXT records shown above to your DNS provider",
+                  "2. Wait 5-10 minutes for DNS propagation",
+                  "3. Run the server command to generate real certificates",
+                  "4. When prompted, press Enter to continue verification",
+                ],
+              })
+            );
+          } else {
+            resolve(
+              NextResponse.json(
+                {
+                  success: false,
+                  error: "No DNS records were generated. Please try again.",
+                  output,
+                  errorOutput,
+                },
+                { status: 500 }
+              )
+            );
+          }
         }
-      }, 10000); // Wait 10 seconds for DNS records
+      }, 15000); // 15 seconds timeout
 
-      process.on("close", (code) => {
+      certbotProcess.on("close", (code) => {
         clearTimeout(timeoutId);
-
         if (responseSent) return;
 
         console.log("Certbot process ended with code:", code);
 
-        if (dnsRecords.length > 0) {
+        if (
+          errorOutput.includes("Another instance of Certbot is already running")
+        ) {
+          resolve(
+            NextResponse.json(
+              {
+                success: false,
+                error:
+                  "Another certbot process is running. Please wait a moment and try again.",
+                suggestion:
+                  "Try refreshing the page and generating again in 30 seconds.",
+                troubleshooting: [
+                  "A previous certbot process is still running",
+                  "Please wait 30 seconds and try again",
+                  "If this persists, contact the administrator",
+                ],
+              },
+              { status: 409 }
+            )
+          );
+        } else if (dnsRecords.length > 0) {
           resolve(
             NextResponse.json({
               success: true,
               message:
-                "DNS verification required. Please add these TXT records to your DNS.",
+                "DNS verification required. Add these TXT records to your DNS provider.",
               dnsRecords,
               serverCommand: `sudo certbot certonly --manual --preferred-challenges dns --email ${email} ${domains
                 .map((d) => `-d ${d}`)
                 .join(" ")} --agree-tos`,
               certificatePath: `/etc/letsencrypt/live/${domain}/`,
               output,
-              note: "This was a dry-run. Remove --dry-run from the server command to generate actual certificates.",
-              nextSteps: [
-                "1. Add the DNS TXT records shown above",
-                "2. Wait for DNS propagation (5-10 minutes)",
-                "3. Run the server command",
-                "4. Press Enter when prompted",
-                "5. Certificate will be generated",
-              ],
-            })
-          );
-        } else if (code === 0) {
-          resolve(
-            NextResponse.json({
-              success: true,
-              message: "Certificate process completed successfully",
-              certificatePath: `/etc/letsencrypt/live/${domain}/`,
-              output,
-              note: "This was a dry-run. Remove --dry-run to generate actual certificates.",
+              note: "This was a dry-run. Remove --dry-run for actual certificates.",
             })
           );
         } else {
@@ -243,9 +291,9 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
                 output,
                 code,
                 troubleshooting: [
-                  "Check that your domain points to this server",
-                  "Ensure ports 80 and 443 are open",
-                  "Verify DNS records are correct",
+                  "Make sure your domain points to this server",
+                  "Check that ports 80 and 443 are accessible",
+                  "Verify your email address is valid",
                   "Try again in a few minutes",
                 ],
               },
@@ -255,9 +303,8 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
         }
       });
 
-      process.on("error", (error) => {
+      certbotProcess.on("error", (error) => {
         clearTimeout(timeoutId);
-
         if (responseSent) return;
 
         console.error("Process error:", error);
@@ -266,7 +313,6 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
             {
               success: false,
               error: `Process failed to start: ${error.message}`,
-              dnsRecords,
             },
             { status: 500 }
           )
