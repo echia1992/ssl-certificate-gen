@@ -1,345 +1,346 @@
-import { NextRequest, NextResponse } from "next/server";
-import { spawn } from "child_process";
+// //api/generate-cert //manual
+// import { NextRequest, NextResponse } from "next/server";
+// import { spawn } from "child_process";
 
-export async function POST(request: NextRequest): Promise<NextResponse> {
-  try {
-    const { domain, email, includeWildcard } = await request.json();
+// export async function POST(request: NextRequest): Promise<NextResponse> {
+//   try {
+//     const { domain, email, includeWildcard } = await request.json();
 
-    if (!domain || !email) {
-      return NextResponse.json(
-        { success: false, error: "Domain and email are required" },
-        { status: 400 }
-      );
-    }
+//     if (!domain || !email) {
+//       return NextResponse.json(
+//         { success: false, error: "Domain and email are required" },
+//         { status: 400 }
+//       );
+//     }
 
-    // Validate domain format
-    const domainRegex =
-      /^[a-zA-Z0-9][a-zA-Z0-9-]{1,61}[a-zA-Z0-9]\.[a-zA-Z]{2,}$/;
-    if (!domainRegex.test(domain)) {
-      return NextResponse.json(
-        { success: false, error: "Invalid domain format" },
-        { status: 400 }
-      );
-    }
+//     // Validate domain format
+//     const domainRegex =
+//       /^[a-zA-Z0-9][a-zA-Z0-9-]{1,61}[a-zA-Z0-9]\.[a-zA-Z]{2,}$/;
+//     if (!domainRegex.test(domain)) {
+//       return NextResponse.json(
+//         { success: false, error: "Invalid domain format" },
+//         { status: 400 }
+//       );
+//     }
 
-    // Clean up any existing processes first
-    try {
-      await new Promise<void>((resolve) => {
-        const cleanup = spawn("sudo", [
-          "bash",
-          "-c",
-          "pkill -f certbot || true; rm -f /var/lib/letsencrypt/.certbot.lock || true; rm -rf /tmp/certbot-* || true",
-        ]);
-        cleanup.on("close", () => resolve());
-        setTimeout(() => {
-          cleanup.kill();
-          resolve();
-        }, 5000);
-      });
-      await new Promise((resolve) => setTimeout(resolve, 2000));
-    } catch (cleanupError) {
-      console.log("Cleanup warning:", cleanupError);
-    }
+//     // Clean up any existing processes first
+//     try {
+//       await new Promise<void>((resolve) => {
+//         const cleanup = spawn("sudo", [
+//           "bash",
+//           "-c",
+//           "pkill -f certbot || true; rm -f /var/lib/letsencrypt/.certbot.lock || true; rm -rf /tmp/certbot-* || true",
+//         ]);
+//         cleanup.on("close", () => resolve());
+//         setTimeout(() => {
+//           cleanup.kill();
+//           resolve();
+//         }, 5000);
+//       });
+//       await new Promise((resolve) => setTimeout(resolve, 2000));
+//     } catch (cleanupError) {
+//       console.log("Cleanup warning:", cleanupError);
+//     }
 
-    // Build domains array
-    const domains = includeWildcard ? [domain, `*.${domain}`] : [domain];
-    const certName = domain.replace(/\*\./g, "wildcard-");
+//     // Build domains array
+//     const domains = includeWildcard ? [domain, `*.${domain}`] : [domain];
+//     const certName = domain.replace(/\*\./g, "wildcard-");
 
-    return new Promise<NextResponse>((resolvePromise) => {
-      const certbotArgs = [
-        "certonly",
-        "--manual",
-        "--preferred-challenges",
-        "dns",
-        "--dry-run", // Use dry-run to get challenge without rate limits
-        "--agree-tos",
-        "--email",
-        email,
-        "--server",
-        "https://acme-v02.api.letsencrypt.org/directory",
-        "--cert-name",
-        certName,
-        "--manual-public-ip-logging-ok",
-        ...domains.flatMap((d) => ["-d", d]),
-      ];
+//     return new Promise<NextResponse>((resolvePromise) => {
+//       const certbotArgs = [
+//         "certonly",
+//         "--manual",
+//         "--preferred-challenges",
+//         "dns",
+//         "--dry-run", // Use dry-run to get challenge without rate limits
+//         "--agree-tos",
+//         "--email",
+//         email,
+//         "--server",
+//         "https://acme-v02.api.letsencrypt.org/directory",
+//         "--cert-name",
+//         certName,
+//         "--manual-public-ip-logging-ok",
+//         ...domains.flatMap((d) => ["-d", d]),
+//       ];
 
-      console.log(`Generating DNS challenge for domain: ${domain}`);
-      console.log("Certbot args:", certbotArgs.join(" "));
+//       console.log(`Generating DNS challenge for domain: ${domain}`);
+//       console.log("Certbot args:", certbotArgs.join(" "));
 
-      const certbotProcess = spawn("sudo", ["certbot", ...certbotArgs], {
-        stdio: ["pipe", "pipe", "pipe"],
-      });
+//       const certbotProcess = spawn("sudo", ["certbot", ...certbotArgs], {
+//         stdio: ["pipe", "pipe", "pipe"],
+//       });
 
-      let output = "";
-      let errorOutput = "";
-      const dnsRecords = [];
+//       let output = "";
+//       let errorOutput = "";
+//       const dnsRecords = [];
 
-      certbotProcess.stdout.on("data", (data) => {
-        const text = data.toString();
-        output += text;
-        console.log("Certbot stdout:", text);
+//       certbotProcess.stdout.on("data", (data) => {
+//         const text = data.toString();
+//         output += text;
+//         console.log("Certbot stdout:", text);
 
-        // Parse DNS challenge records with multiple patterns
-        const lines = text.split("\n");
-        for (let i = 0; i < lines.length; i++) {
-          const line = lines[i].trim();
+//         // Parse DNS challenge records with multiple patterns
+//         const lines = text.split("\n");
+//         for (let i = 0; i < lines.length; i++) {
+//           const line = lines[i].trim();
 
-          // Look for DNS TXT record instructions
-          if (line.includes("Please deploy a DNS TXT record under the name")) {
-            let recordName = "";
-            let recordValue = "";
+//           // Look for DNS TXT record instructions
+//           if (line.includes("Please deploy a DNS TXT record under the name")) {
+//             let recordName = "";
+//             let recordValue = "";
 
-            // Extract record name from the current line
-            const nameMatch = line.match(/_acme-challenge\.[a-zA-Z0-9\.\-]+/);
-            if (nameMatch) {
-              recordName = nameMatch[0].replace(/[:\.,\s]*$/, "");
-              console.log(`Found DNS record name for ${domain}:`, recordName);
-            }
+//             // Extract record name from the current line
+//             const nameMatch = line.match(/_acme-challenge\.[a-zA-Z0-9\.\-]+/);
+//             if (nameMatch) {
+//               recordName = nameMatch[0].replace(/[:\.,\s]*$/, "");
+//               console.log(`Found DNS record name for ${domain}:`, recordName);
+//             }
 
-            // Look for the value in subsequent lines
-            for (let j = i + 1; j < Math.min(i + 15, lines.length); j++) {
-              const nextLine = lines[j].trim();
+//             // Look for the value in subsequent lines
+//             for (let j = i + 1; j < Math.min(i + 15, lines.length); j++) {
+//               const nextLine = lines[j].trim();
 
-              if (
-                nextLine.includes("with the following value") ||
-                nextLine.includes("with value")
-              ) {
-                // Check if value is on the same line
-                const valueParts = nextLine.split(":");
-                if (valueParts.length > 1) {
-                  const possibleValue =
-                    valueParts[valueParts.length - 1].trim();
-                  if (
-                    possibleValue.length > 20 &&
-                    /^[A-Za-z0-9_\-]+$/.test(possibleValue)
-                  ) {
-                    recordValue = possibleValue;
-                    console.log(
-                      `Found DNS record value for ${domain}:`,
-                      recordValue
-                    );
-                    break;
-                  }
-                }
+//               if (
+//                 nextLine.includes("with the following value") ||
+//                 nextLine.includes("with value")
+//               ) {
+//                 // Check if value is on the same line
+//                 const valueParts = nextLine.split(":");
+//                 if (valueParts.length > 1) {
+//                   const possibleValue =
+//                     valueParts[valueParts.length - 1].trim();
+//                   if (
+//                     possibleValue.length > 20 &&
+//                     /^[A-Za-z0-9_\-]+$/.test(possibleValue)
+//                   ) {
+//                     recordValue = possibleValue;
+//                     console.log(
+//                       `Found DNS record value for ${domain}:`,
+//                       recordValue
+//                     );
+//                     break;
+//                   }
+//                 }
 
-                // Check next few lines for the value
-                for (let k = j + 1; k < Math.min(j + 5, lines.length); k++) {
-                  const valueLine = lines[k].trim();
-                  if (
-                    valueLine.length > 20 &&
-                    /^[A-Za-z0-9_\-]+$/.test(valueLine) &&
-                    !valueLine.includes("_acme-challenge") &&
-                    !valueLine.includes("Before continuing")
-                  ) {
-                    recordValue = valueLine;
-                    console.log(
-                      `Found DNS record value on line ${k} for ${domain}:`,
-                      recordValue
-                    );
-                    break;
-                  }
-                }
-                break;
-              }
-            }
+//                 // Check next few lines for the value
+//                 for (let k = j + 1; k < Math.min(j + 5, lines.length); k++) {
+//                   const valueLine = lines[k].trim();
+//                   if (
+//                     valueLine.length > 20 &&
+//                     /^[A-Za-z0-9_\-]+$/.test(valueLine) &&
+//                     !valueLine.includes("_acme-challenge") &&
+//                     !valueLine.includes("Before continuing")
+//                   ) {
+//                     recordValue = valueLine;
+//                     console.log(
+//                       `Found DNS record value on line ${k} for ${domain}:`,
+//                       recordValue
+//                     );
+//                     break;
+//                   }
+//                 }
+//                 break;
+//               }
+//             }
 
-            if (recordName && recordValue) {
-              const baseDomain = recordName.replace("_acme-challenge.", "");
-              const dnsRecord = {
-                name: recordName,
-                type: "TXT",
-                value: recordValue,
-                domain: baseDomain,
-                targetDomain: domain,
-              };
+//             if (recordName && recordValue) {
+//               const baseDomain = recordName.replace("_acme-challenge.", "");
+//               const dnsRecord = {
+//                 name: recordName,
+//                 type: "TXT",
+//                 value: recordValue,
+//                 domain: baseDomain,
+//                 targetDomain: domain,
+//               };
 
-              // Avoid duplicates
-              if (
-                !dnsRecords.find(
-                  (r) => r.name === recordName && r.value === recordValue
-                )
-              ) {
-                dnsRecords.push(dnsRecord);
-                console.log(`Added DNS record for ${domain}:`, dnsRecord);
-              }
-            }
-          }
-        }
-      });
+//               // Avoid duplicates
+//               if (
+//                 !dnsRecords.find(
+//                   (r) => r.name === recordName && r.value === recordValue
+//                 )
+//               ) {
+//                 dnsRecords.push(dnsRecord);
+//                 console.log(`Added DNS record for ${domain}:`, dnsRecord);
+//               }
+//             }
+//           }
+//         }
+//       });
 
-      certbotProcess.stderr.on("data", (data) => {
-        const text = data.toString();
-        errorOutput += text;
-        console.error("Certbot stderr:", text);
-      });
+//       certbotProcess.stderr.on("data", (data) => {
+//         const text = data.toString();
+//         errorOutput += text;
+//         console.error("Certbot stderr:", text);
+//       });
 
-      certbotProcess.on("close", (code) => {
-        console.log(
-          `Certbot process ended with code: ${code} for domain: ${domain}`
-        );
+//       certbotProcess.on("close", (code) => {
+//         console.log(
+//           `Certbot process ended with code: ${code} for domain: ${domain}`
+//         );
 
-        if (dnsRecords.length > 0) {
-          resolvePromise(
-            NextResponse.json({
-              success: true,
-              message: `DNS verification required for ${domain}. Add these TXT records to your DNS provider.`,
-              dnsRecords,
-              serverCommand: `sudo certbot certonly --manual --preferred-challenges dns --email ${email} ${domains
-                .map((d) => `-d ${d}`)
-                .join(" ")} --agree-tos --cert-name ${certName}`,
-              certificatePath: `/etc/letsencrypt/live/${certName}/`,
-              targetDomain: domain,
-              instructions: [
-                `Add the DNS TXT records shown above to ${domain}'s DNS provider`,
-                "Wait 5-10 minutes for DNS propagation",
-                "Run the server command to generate real certificates",
-                "When prompted, press Enter to continue verification",
-              ],
-              note: `Remove --dry-run from the server command to generate actual certificates for ${domain}.`,
-              output,
-              nextSteps: [
-                `Copy each DNS record (name, type, value) to ${domain}'s DNS settings`,
-                "Add them as TXT records in your DNS management panel",
-                "Wait for DNS propagation (usually 5-10 minutes)",
-                "Run the server command without --dry-run to get real certificates",
-              ],
-              dnsInstructions: {
-                cloudflare: [
-                  `Login to Cloudflare and select ${domain}`,
-                  "Go to DNS → Records",
-                  "Click 'Add record'",
-                  "Select TXT type",
-                  "Paste the record name and value from above",
-                  "Save the record",
-                ],
-                namecheap: [
-                  `Login to Namecheap and go to Domain List`,
-                  `Click 'Manage' next to ${domain}`,
-                  "Go to Advanced DNS",
-                  "Click 'Add New Record'",
-                  "Select TXT Record type",
-                  "Enter the host and value from above",
-                ],
-                godaddy: [
-                  `Login to GoDaddy and select ${domain}`,
-                  "Go to DNS Management",
-                  "Click 'Add' to add a new record",
-                  "Select TXT type",
-                  "Enter the name and value from above",
-                ],
-                cpanel: [
-                  "Login to cPanel",
-                  "Go to Zone Editor",
-                  `Select ${domain}`,
-                  "Click 'Add Record'",
-                  "Choose TXT record type",
-                  "Enter the name and value shown above",
-                ],
-              },
-            })
-          );
-        } else {
-          resolvePromise(
-            NextResponse.json({
-              success: true,
-              message: `Please run the server command below to get DNS verification instructions for ${domain}.`,
-              serverCommand: `sudo certbot certonly --manual --preferred-challenges dns --email ${email} ${domains
-                .map((d) => `-d ${d}`)
-                .join(" ")} --agree-tos --cert-name ${certName}`,
-              certificatePath: `/etc/letsencrypt/live/${certName}/`,
-              targetDomain: domain,
-              instructions: [
-                "SSH into your server",
-                "Run the server command shown above",
-                `Certbot will show you the DNS TXT records to add for ${domain}`,
-                "Add those records to your DNS provider",
-                "Wait for DNS propagation, then press Enter in certbot",
-              ],
-              note: `This command will show you the exact DNS records needed for ${domain}. The actual DNS values will be displayed when you run certbot on your server.`,
-              output,
-              troubleshooting: [
-                `Ensure ${domain} is a valid domain you own`,
-                "Check that your server has internet connectivity",
-                "Verify certbot is properly installed",
-                "Make sure you have sudo privileges",
-              ],
-            })
-          );
-        }
-      });
+//         if (dnsRecords.length > 0) {
+//           resolvePromise(
+//             NextResponse.json({
+//               success: true,
+//               message: `DNS verification required for ${domain}. Add these TXT records to your DNS provider.`,
+//               dnsRecords,
+//               serverCommand: `sudo certbot certonly --manual --preferred-challenges dns --email ${email} ${domains
+//                 .map((d) => `-d ${d}`)
+//                 .join(" ")} --agree-tos --cert-name ${certName}`,
+//               certificatePath: `/etc/letsencrypt/live/${certName}/`,
+//               targetDomain: domain,
+//               instructions: [
+//                 `Add the DNS TXT records shown above to ${domain}'s DNS provider`,
+//                 "Wait 5-10 minutes for DNS propagation",
+//                 "Run the server command to generate real certificates",
+//                 "When prompted, press Enter to continue verification",
+//               ],
+//               note: `Remove --dry-run from the server command to generate actual certificates for ${domain}.`,
+//               output,
+//               nextSteps: [
+//                 `Copy each DNS record (name, type, value) to ${domain}'s DNS settings`,
+//                 "Add them as TXT records in your DNS management panel",
+//                 "Wait for DNS propagation (usually 5-10 minutes)",
+//                 "Run the server command without --dry-run to get real certificates",
+//               ],
+//               dnsInstructions: {
+//                 cloudflare: [
+//                   `Login to Cloudflare and select ${domain}`,
+//                   "Go to DNS → Records",
+//                   "Click 'Add record'",
+//                   "Select TXT type",
+//                   "Paste the record name and value from above",
+//                   "Save the record",
+//                 ],
+//                 namecheap: [
+//                   `Login to Namecheap and go to Domain List`,
+//                   `Click 'Manage' next to ${domain}`,
+//                   "Go to Advanced DNS",
+//                   "Click 'Add New Record'",
+//                   "Select TXT Record type",
+//                   "Enter the host and value from above",
+//                 ],
+//                 godaddy: [
+//                   `Login to GoDaddy and select ${domain}`,
+//                   "Go to DNS Management",
+//                   "Click 'Add' to add a new record",
+//                   "Select TXT type",
+//                   "Enter the name and value from above",
+//                 ],
+//                 cpanel: [
+//                   "Login to cPanel",
+//                   "Go to Zone Editor",
+//                   `Select ${domain}`,
+//                   "Click 'Add Record'",
+//                   "Choose TXT record type",
+//                   "Enter the name and value shown above",
+//                 ],
+//               },
+//             })
+//           );
+//         } else {
+//           resolvePromise(
+//             NextResponse.json({
+//               success: true,
+//               message: `Please run the server command below to get DNS verification instructions for ${domain}.`,
+//               serverCommand: `sudo certbot certonly --manual --preferred-challenges dns --email ${email} ${domains
+//                 .map((d) => `-d ${d}`)
+//                 .join(" ")} --agree-tos --cert-name ${certName}`,
+//               certificatePath: `/etc/letsencrypt/live/${certName}/`,
+//               targetDomain: domain,
+//               instructions: [
+//                 "SSH into your server",
+//                 "Run the server command shown above",
+//                 `Certbot will show you the DNS TXT records to add for ${domain}`,
+//                 "Add those records to your DNS provider",
+//                 "Wait for DNS propagation, then press Enter in certbot",
+//               ],
+//               note: `This command will show you the exact DNS records needed for ${domain}. The actual DNS values will be displayed when you run certbot on your server.`,
+//               output,
+//               troubleshooting: [
+//                 `Ensure ${domain} is a valid domain you own`,
+//                 "Check that your server has internet connectivity",
+//                 "Verify certbot is properly installed",
+//                 "Make sure you have sudo privileges",
+//               ],
+//             })
+//           );
+//         }
+//       });
 
-      certbotProcess.on("error", (error) => {
-        console.error(`Certbot process error for ${domain}:`, error);
-        resolvePromise(
-          NextResponse.json({
-            success: false,
-            error: `Failed to start certificate generation process for ${domain}: ${error.message}`,
-            troubleshooting: [
-              "Check if certbot is installed on the server",
-              "Ensure you have proper permissions",
-              "Verify the domain format is correct",
-              "Try using a different email address",
-            ],
-          })
-        );
-      });
+//       certbotProcess.on("error", (error) => {
+//         console.error(`Certbot process error for ${domain}:`, error);
+//         resolvePromise(
+//           NextResponse.json({
+//             success: false,
+//             error: `Failed to start certificate generation process for ${domain}: ${error.message}`,
+//             troubleshooting: [
+//               "Check if certbot is installed on the server",
+//               "Ensure you have proper permissions",
+//               "Verify the domain format is correct",
+//               "Try using a different email address",
+//             ],
+//           })
+//         );
+//       });
 
-      // Timeout after 30 seconds
-      setTimeout(() => {
-        certbotProcess.kill("SIGTERM");
-        if (dnsRecords.length > 0) {
-          resolvePromise(
-            NextResponse.json({
-              success: true,
-              message: `DNS verification required for ${domain}. Add these TXT records to your DNS provider.`,
-              dnsRecords,
-              serverCommand: `sudo certbot certonly --manual --preferred-challenges dns --email ${email} ${domains
-                .map((d) => `-d ${d}`)
-                .join(" ")} --agree-tos --cert-name ${certName}`,
-              certificatePath: `/etc/letsencrypt/live/${certName}/`,
-              targetDomain: domain,
-              instructions: [
-                `Add the DNS TXT records shown above to ${domain}'s DNS provider`,
-                "Wait 5-10 minutes for DNS propagation",
-                "Run the server command to generate real certificates",
-              ],
-              note: `Process timed out, but found DNS records for ${domain}.`,
-              output,
-            })
-          );
-        } else {
-          resolvePromise(
-            NextResponse.json({
-              success: false,
-              error: `Certificate generation process timed out for ${domain}`,
-              troubleshooting: [
-                "The process took too long to respond",
-                "Try with a simpler domain configuration",
-                "Check server load and connectivity",
-                "Retry the operation",
-              ],
-            })
-          );
-        }
-      }, 30000);
-    });
-  } catch (error) {
-    console.error(`Certificate generation error for domain:`, error);
-    return NextResponse.json(
-      {
-        success: false,
-        error: `Internal server error: ${error.message}`,
-        troubleshooting: [
-          "Check server configuration",
-          "Verify certbot installation",
-          "Ensure proper permissions",
-          "Try again with a different domain",
-        ],
-      },
-      { status: 500 }
-    );
-  }
-}
+//       // Timeout after 30 seconds
+//       setTimeout(() => {
+//         certbotProcess.kill("SIGTERM");
+//         if (dnsRecords.length > 0) {
+//           resolvePromise(
+//             NextResponse.json({
+//               success: true,
+//               message: `DNS verification required for ${domain}. Add these TXT records to your DNS provider.`,
+//               dnsRecords,
+//               serverCommand: `sudo certbot certonly --manual --preferred-challenges dns --email ${email} ${domains
+//                 .map((d) => `-d ${d}`)
+//                 .join(" ")} --agree-tos --cert-name ${certName}`,
+//               certificatePath: `/etc/letsencrypt/live/${certName}/`,
+//               targetDomain: domain,
+//               instructions: [
+//                 `Add the DNS TXT records shown above to ${domain}'s DNS provider`,
+//                 "Wait 5-10 minutes for DNS propagation",
+//                 "Run the server command to generate real certificates",
+//               ],
+//               note: `Process timed out, but found DNS records for ${domain}.`,
+//               output,
+//             })
+//           );
+//         } else {
+//           resolvePromise(
+//             NextResponse.json({
+//               success: false,
+//               error: `Certificate generation process timed out for ${domain}`,
+//               troubleshooting: [
+//                 "The process took too long to respond",
+//                 "Try with a simpler domain configuration",
+//                 "Check server load and connectivity",
+//                 "Retry the operation",
+//               ],
+//             })
+//           );
+//         }
+//       }, 30000);
+//     });
+//   } catch (error) {
+//     console.error(`Certificate generation error for domain:`, error);
+//     return NextResponse.json(
+//       {
+//         success: false,
+//         error: `Internal server error: ${error.message}`,
+//         troubleshooting: [
+//           "Check server configuration",
+//           "Verify certbot installation",
+//           "Ensure proper permissions",
+//           "Try again with a different domain",
+//         ],
+//       },
+//       { status: 500 }
+//     );
+//   }
+// }
 
 // import { NextRequest, NextResponse } from "next/server";
 // import { spawn } from "child_process";
