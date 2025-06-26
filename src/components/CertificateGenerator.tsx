@@ -12,7 +12,6 @@ import {
   FileText,
   Key,
   Award,
-  Upload,
   Server,
   Settings,
 } from "lucide-react";
@@ -28,7 +27,11 @@ const SSLGenerator = () => {
 
   const copyToClipboard = async (text, itemId) => {
     try {
-      await navigator.clipboard.writeText(text);
+      // Ensure text is properly formatted
+      const textContent =
+        typeof text === "string" ? text.trim() : String(text).trim();
+
+      await navigator.clipboard.writeText(textContent);
       setCopiedItems((prev) => new Set([...prev, itemId]));
       setTimeout(() => {
         setCopiedItems((prev) => {
@@ -38,8 +41,11 @@ const SSLGenerator = () => {
         });
       }, 2000);
     } catch (err) {
+      // Fallback for browsers that don't support clipboard API
+      const textContent =
+        typeof text === "string" ? text.trim() : String(text).trim();
       const textArea = document.createElement("textarea");
-      textArea.value = text;
+      textArea.value = textContent;
       document.body.appendChild(textArea);
       textArea.select();
       document.execCommand("copy");
@@ -57,11 +63,20 @@ const SSLGenerator = () => {
   };
 
   const downloadAsTextFile = (content, filename) => {
-    const blob = new Blob([content], { type: "text/plain;charset=utf-8" });
+    // Ensure content is properly formatted text
+    const textContent =
+      typeof content === "string" ? content.trim() : String(content).trim();
+
+    // Ensure filename has .txt extension
+    const txtFilename = filename.endsWith(".txt")
+      ? filename
+      : `${filename}.txt`;
+
+    const blob = new Blob([textContent], { type: "text/plain;charset=utf-8" });
     const url = window.URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = filename;
+    a.download = txtFilename;
     document.body.appendChild(a);
     a.click();
     window.URL.revokeObjectURL(url);
@@ -80,12 +95,18 @@ const SSLGenerator = () => {
         content: result.certificateFiles.privkey,
         name: `${domain}_privkey.txt`,
       },
-      { content: result.certificateFiles.cert, name: `${domain}_cert.txt` },
-      { content: result.certificateFiles.chain, name: `${domain}_chain.txt` },
+      {
+        content: result.certificateFiles.cert,
+        name: `${domain}_cert.txt`,
+      },
+      {
+        content: result.certificateFiles.chain,
+        name: `${domain}_chain.txt`,
+      },
     ];
 
     files.forEach((file) => {
-      if (file.content) {
+      if (file.content && file.content.trim().length > 0) {
         downloadAsTextFile(file.content, file.name);
       }
     });
@@ -117,43 +138,53 @@ const SSLGenerator = () => {
     icon: Icon,
     description,
     usage,
-  }) => (
-    <div className="border border-gray-200 rounded-lg p-4 bg-white shadow-sm">
-      <div className="flex items-center justify-between mb-3">
-        <div className="flex items-center gap-2">
-          <Icon size={18} className="text-blue-600" />
-          <h5 className="font-semibold text-gray-800">{title}</h5>
+  }) => {
+    // Ensure content is properly formatted for display and download
+    const formattedContent = content ? content.trim() : "";
+    const txtFilename = filename.endsWith(".txt")
+      ? filename
+      : `${filename}.txt`;
+
+    return (
+      <div className="border border-gray-200 rounded-lg p-4 bg-white shadow-sm">
+        <div className="flex items-center justify-between mb-3">
+          <div className="flex items-center gap-2">
+            <Icon size={18} className="text-blue-600" />
+            <h5 className="font-semibold text-gray-800">{title}</h5>
+          </div>
+          <div className="flex gap-2">
+            <CopyButton
+              text={formattedContent}
+              itemId={`cert-${filename}`}
+              className="text-xs"
+            />
+            <button
+              onClick={() => downloadAsTextFile(formattedContent, txtFilename)}
+              className="inline-flex items-center gap-1 px-2 py-1 text-xs rounded bg-blue-100 hover:bg-blue-200 text-blue-700 border border-blue-300 transition-colors"
+              title="Download as text file"
+            >
+              <Download size={12} />
+              Download
+            </button>
+          </div>
         </div>
-        <div className="flex gap-2">
-          <CopyButton
-            text={content}
-            itemId={`cert-${filename}`}
-            className="text-xs"
-          />
-          <button
-            onClick={() => downloadAsTextFile(content, filename)}
-            className="inline-flex items-center gap-1 px-2 py-1 text-xs rounded bg-blue-100 hover:bg-blue-200 text-blue-700 border border-blue-300 transition-colors"
-            title="Download as text file"
-          >
-            <Download size={12} />
-            Download
-          </button>
+
+        <div className="mb-2 p-2 bg-blue-50 rounded border border-blue-200">
+          <p className="text-xs text-blue-800">
+            <strong>Usage:</strong> {usage}
+          </p>
+        </div>
+
+        <p className="text-xs text-gray-600 mb-3">{description}</p>
+
+        <div className="bg-gray-900 text-green-400 p-3 rounded-md font-mono text-xs overflow-x-auto max-h-48 overflow-y-auto">
+          <pre className="whitespace-pre-wrap break-all">
+            {formattedContent}
+          </pre>
         </div>
       </div>
-
-      <div className="mb-2 p-2 bg-blue-50 rounded border border-blue-200">
-        <p className="text-xs text-blue-800">
-          <strong>Usage:</strong> {usage}
-        </p>
-      </div>
-
-      <p className="text-xs text-gray-600 mb-3">{description}</p>
-
-      <div className="bg-gray-900 text-green-400 p-3 rounded-md font-mono text-xs overflow-x-auto max-h-48 overflow-y-auto">
-        <pre className="whitespace-pre-wrap break-all">{content}</pre>
-      </div>
-    </div>
-  );
+    );
+  };
 
   const generateCertificate = async () => {
     if (!domain || !email) return;
@@ -199,12 +230,12 @@ const SSLGenerator = () => {
           <div className="flex items-center justify-center gap-2 mb-4">
             <Shield className="w-8 h-8 text-blue-600" />
             <h1 className="text-3xl font-bold text-gray-900">
-              Let's Encrypt SSL Generator
+              Universal SSL Certificate Generator
             </h1>
           </div>
           <p className="text-gray-600">
-            Generate free SSL certificates for any server, hosting provider, or
-            control panel
+            Generate free SSL certificates for any domain and hosting provider -
+            cPanel, Plesk, VPS, or dedicated servers by Tony
           </p>
         </div>
 
@@ -230,11 +261,12 @@ const SSLGenerator = () => {
                     <h4 className="font-medium">Manual DNS Verification</h4>
                   </div>
                   <p className="text-sm text-gray-600">
-                    Get DNS verification instructions. You add TXT records
-                    manually and run commands on your server.
+                    Get DNS verification instructions for any domain. You add
+                    TXT records manually and run commands on your server.
                   </p>
                   <div className="mt-2 text-xs text-gray-500">
-                    Best for: Self-managed servers, VPS, dedicated servers
+                    Best for: Self-managed servers, VPS, dedicated servers, any
+                    domain
                   </div>
                 </div>
 
@@ -252,10 +284,10 @@ const SSLGenerator = () => {
                   </div>
                   <p className="text-sm text-gray-600">
                     Generate certificates automatically with downloadable files
-                    for hosting control panels.
+                    for any hosting control panel.
                   </p>
                   <div className="mt-2 text-xs text-gray-500">
-                    Best for: cPanel, Plesk, shared hosting, manual installation
+                    Best for: cPanel, Plesk, shared hosting, any domain
                   </div>
                 </div>
               </div>
@@ -275,6 +307,9 @@ const SSLGenerator = () => {
                   className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
                   required
                 />
+                <p className="text-xs text-gray-500 mt-1">
+                  Any domain: yourdomain.com, company.org, etc.
+                </p>
               </div>
 
               <div>
@@ -290,6 +325,9 @@ const SSLGenerator = () => {
                   className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
                   required
                 />
+                <p className="text-xs text-gray-500 mt-1">
+                  Required for Let's Encrypt registration
+                </p>
               </div>
             </div>
 
@@ -313,7 +351,7 @@ const SSLGenerator = () => {
             >
               {loading
                 ? "Processing..."
-                : `Generate SSL Certificate (${
+                : `Generate SSL Certificate for ${domain || "Your Domain"} (${
                     generationType === "manual" ? "Manual" : "Automatic"
                   })`}
             </button>
@@ -330,13 +368,13 @@ const SSLGenerator = () => {
                   <div className="bg-white rounded-lg shadow-lg p-6">
                     <h4 className="text-lg font-bold text-gray-800 mb-4 flex items-center gap-2">
                       <Globe size={20} />
-                      DNS Verification Required
+                      DNS Verification Required for {domain}
                     </h4>
 
                     <div className="mb-4 p-4 bg-yellow-50 border border-yellow-200 rounded-lg">
                       <p className="text-sm text-yellow-800">
-                        <strong>Step 1:</strong> Add these DNS TXT records to
-                        your domain's DNS settings
+                        <strong>Step 1:</strong> Add these DNS TXT records to{" "}
+                        {domain}'s DNS settings
                       </p>
                     </div>
 
@@ -403,7 +441,7 @@ const SSLGenerator = () => {
                   <div className="bg-white rounded-lg shadow-lg p-6">
                     <h4 className="text-lg font-bold text-gray-800 mb-4 flex items-center gap-2">
                       <Terminal size={20} />
-                      Server Command
+                      Server Command for {domain}
                     </h4>
                     <div className="bg-gray-900 text-green-400 p-4 rounded-md font-mono text-sm relative">
                       <pre className="whitespace-pre-wrap break-all">
@@ -419,9 +457,9 @@ const SSLGenerator = () => {
                     </div>
                     <div className="mt-3 p-3 bg-blue-50 border border-blue-200 rounded">
                       <p className="text-sm text-blue-800">
-                        <strong>Step 2:</strong> After adding DNS records, run
-                        this command on your server and press Enter when
-                        prompted.
+                        <strong>Step 2:</strong> After adding DNS records for{" "}
+                        {domain}, run this command on your server and press
+                        Enter when prompted.
                       </p>
                     </div>
                   </div>
@@ -433,16 +471,41 @@ const SSLGenerator = () => {
                     <div className="flex items-center justify-between mb-4">
                       <h4 className="text-lg font-bold text-gray-800 flex items-center gap-2">
                         <Award size={20} />
-                        Generated SSL Certificates
+                        Generated SSL Certificates for {domain}
                       </h4>
-                      <button
-                        onClick={downloadAllCertificates}
-                        className="flex items-center gap-2 px-4 py-2 bg-purple-600 text-white rounded-md hover:bg-purple-700 transition-colors"
-                      >
-                        <Download size={16} />
-                        Download All as Text Files
-                      </button>
+                      {(result.certificateFiles.fullchain ||
+                        result.certificateFiles.privkey ||
+                        result.certificateFiles.cert ||
+                        result.certificateFiles.chain) && (
+                        <button
+                          onClick={downloadAllCertificates}
+                          className="flex items-center gap-2 px-4 py-2 bg-purple-600 text-white rounded-md hover:bg-purple-700 transition-colors"
+                        >
+                          <Download size={16} />
+                          Download All as Text Files
+                        </button>
+                      )}
                     </div>
+
+                    {/* Show warning if no certificate files */}
+                    {!result.certificateFiles.fullchain &&
+                      !result.certificateFiles.privkey &&
+                      !result.certificateFiles.cert &&
+                      !result.certificateFiles.chain && (
+                        <div className="mb-4 p-4 bg-yellow-50 border border-yellow-200 rounded-lg">
+                          <p className="text-sm text-yellow-800">
+                            <strong>Notice:</strong> Certificate files are not
+                            available for {domain}. This may be because:
+                          </p>
+                          <ul className="text-sm text-yellow-700 mt-2 list-disc list-inside">
+                            <li>DNS records need to be added first</li>
+                            <li>Certificate generation is still in progress</li>
+                            <li>
+                              There was an issue with the generation process
+                            </li>
+                          </ul>
+                        </div>
+                      )}
 
                     <div className="grid gap-6">
                       {/* Full Chain Certificate */}
@@ -502,30 +565,36 @@ const SSLGenerator = () => {
                           For Hosting Control Panels (cPanel, Plesk)
                         </h5>
                         <ol className="text-sm text-blue-800 space-y-1 list-decimal list-inside">
-                          <li>Go to SSL/TLS section</li>
+                          <li>Go to SSL/TLS → Install and Manage SSL</li>
+                          <li>
+                            Select your domain: <strong>{domain}</strong>
+                          </li>
                           <li>
                             Upload or paste <strong>Full Chain</strong>{" "}
-                            certificate
+                            certificate in CRT field
                           </li>
                           <li>
-                            Upload or paste <strong>Private Key</strong>
+                            Upload or paste <strong>Private Key</strong> in KEY
+                            field
                           </li>
                           <li>
-                            Upload or paste <strong>CA Bundle</strong> if
-                            required
+                            Upload or paste <strong>CA Bundle</strong> in
+                            CABUNDLE field
                           </li>
-                          <li>Install and activate</li>
+                          <li>Click "Install Certificate" to activate SSL</li>
                         </ol>
                       </div>
 
                       {/* Server Configuration */}
                       <div className="p-4 bg-green-50 border border-green-200 rounded-lg">
                         <h5 className="font-semibold text-green-900 mb-3">
-                          For Direct Server Installation
+                          For Direct Server Installation ({domain})
                         </h5>
                         <ol className="text-sm text-green-800 space-y-1 list-decimal list-inside">
                           <li>Upload certificate files to your server</li>
-                          <li>Configure web server (Nginx/Apache)</li>
+                          <li>
+                            Configure web server (Nginx/Apache) for {domain}
+                          </li>
                           <li>
                             Use <strong>Full Chain</strong> for ssl_certificate
                           </li>
@@ -533,7 +602,7 @@ const SSLGenerator = () => {
                             Use <strong>Private Key</strong> for
                             ssl_certificate_key
                           </li>
-                          <li>Restart web server</li>
+                          <li>Restart web server and test SSL</li>
                         </ol>
                       </div>
                     </div>
@@ -544,7 +613,7 @@ const SSLGenerator = () => {
                 {result.instructions && (
                   <div className="bg-white rounded-lg shadow-lg p-6">
                     <h4 className="text-lg font-bold text-gray-800 mb-4">
-                      Next Steps
+                      Next Steps for {domain}
                     </h4>
                     <div className="space-y-3">
                       {result.instructions.map((instruction, index) => (
@@ -576,6 +645,15 @@ const SSLGenerator = () => {
                       </p>
                     </div>
                   )}
+                  {result.isTestCertificate && (
+                    <div className="mt-3 p-3 bg-blue-50 border border-blue-200 rounded">
+                      <p className="text-sm text-blue-800">
+                        <strong>Development Mode:</strong> These are test
+                        certificates for {domain}. For production SSL, ensure
+                        DNS records are properly configured and try again.
+                      </p>
+                    </div>
+                  )}
                 </div>
               </>
             ) : (
@@ -583,7 +661,7 @@ const SSLGenerator = () => {
                 <div className="flex items-center gap-2 text-red-700 mb-4">
                   <AlertCircle className="w-5 h-5" />
                   <h3 className="text-lg font-semibold">
-                    Certificate Generation Failed
+                    Certificate Generation Failed for {domain}
                   </h3>
                 </div>
                 <div className="bg-red-50 border border-red-200 text-red-800 p-3 rounded-md">
@@ -592,7 +670,7 @@ const SSLGenerator = () => {
                 {result.troubleshooting && (
                   <div className="mt-4">
                     <h5 className="font-medium text-gray-800 mb-2">
-                      Troubleshooting Tips:
+                      Troubleshooting Tips for {domain}:
                     </h5>
                     <ul className="text-sm text-gray-600 space-y-1 list-disc list-inside">
                       {result.troubleshooting.map((tip, index) => (
@@ -623,6 +701,632 @@ const SSLGenerator = () => {
 };
 
 export default SSLGenerator;
+
+// "use client";
+// import React, { useState } from "react";
+// import {
+//   Copy,
+//   Check,
+//   Shield,
+//   Globe,
+//   Mail,
+//   AlertCircle,
+//   Terminal,
+//   Download,
+//   FileText,
+//   Key,
+//   Award,
+//   Upload,
+//   Server,
+//   Settings,
+// } from "lucide-react";
+
+// const SSLGenerator = () => {
+//   const [domain, setDomain] = useState("");
+//   const [email, setEmail] = useState("");
+//   const [includeWildcard, setIncludeWildcard] = useState(false);
+//   const [generationType, setGenerationType] = useState("manual"); // 'manual' or 'automatic'
+//   const [loading, setLoading] = useState(false);
+//   const [result, setResult] = useState(null);
+//   const [copiedItems, setCopiedItems] = useState(new Set());
+
+//   const copyToClipboard = async (text, itemId) => {
+//     try {
+//       await navigator.clipboard.writeText(text);
+//       setCopiedItems((prev) => new Set([...prev, itemId]));
+//       setTimeout(() => {
+//         setCopiedItems((prev) => {
+//           const newSet = new Set(prev);
+//           newSet.delete(itemId);
+//           return newSet;
+//         });
+//       }, 2000);
+//     } catch (err) {
+//       const textArea = document.createElement("textarea");
+//       textArea.value = text;
+//       document.body.appendChild(textArea);
+//       textArea.select();
+//       document.execCommand("copy");
+//       document.body.removeChild(textArea);
+
+//       setCopiedItems((prev) => new Set([...prev, itemId]));
+//       setTimeout(() => {
+//         setCopiedItems((prev) => {
+//           const newSet = new Set(prev);
+//           newSet.delete(itemId);
+//           return newSet;
+//         });
+//       }, 2000);
+//     }
+//   };
+
+//   const downloadAsTextFile = (content, filename) => {
+//     const blob = new Blob([content], { type: "text/plain;charset=utf-8" });
+//     const url = window.URL.createObjectURL(blob);
+//     const a = document.createElement("a");
+//     a.href = url;
+//     a.download = filename;
+//     document.body.appendChild(a);
+//     a.click();
+//     window.URL.revokeObjectURL(url);
+//     document.body.removeChild(a);
+//   };
+
+//   const downloadAllCertificates = () => {
+//     if (!result?.certificateFiles) return;
+
+//     const files = [
+//       {
+//         content: result.certificateFiles.fullchain,
+//         name: `${domain}_fullchain.txt`,
+//       },
+//       {
+//         content: result.certificateFiles.privkey,
+//         name: `${domain}_privkey.txt`,
+//       },
+//       { content: result.certificateFiles.cert, name: `${domain}_cert.txt` },
+//       { content: result.certificateFiles.chain, name: `${domain}_chain.txt` },
+//     ];
+
+//     files.forEach((file) => {
+//       if (file.content) {
+//         downloadAsTextFile(file.content, file.name);
+//       }
+//     });
+//   };
+
+//   const CopyButton = ({ text, itemId, className = "" }) => {
+//     const isCopied = copiedItems.has(itemId);
+
+//     return (
+//       <button
+//         onClick={() => copyToClipboard(text, itemId)}
+//         className={`inline-flex items-center gap-1 px-3 py-1 text-sm rounded transition-colors ${className} ${
+//           isCopied
+//             ? "bg-green-100 text-green-700 border border-green-300"
+//             : "bg-gray-100 hover:bg-gray-200 text-gray-700 border border-gray-300"
+//         }`}
+//         title={isCopied ? "Copied!" : "Copy to clipboard"}
+//       >
+//         {isCopied ? <Check size={14} /> : <Copy size={14} />}
+//         {isCopied ? "Copied!" : "Copy"}
+//       </button>
+//     );
+//   };
+
+//   const CertificateFileCard = ({
+//     title,
+//     content,
+//     filename,
+//     icon: Icon,
+//     description,
+//     usage,
+//   }) => (
+//     <div className="border border-gray-200 rounded-lg p-4 bg-white shadow-sm">
+//       <div className="flex items-center justify-between mb-3">
+//         <div className="flex items-center gap-2">
+//           <Icon size={18} className="text-blue-600" />
+//           <h5 className="font-semibold text-gray-800">{title}</h5>
+//         </div>
+//         <div className="flex gap-2">
+//           <CopyButton
+//             text={content}
+//             itemId={`cert-${filename}`}
+//             className="text-xs"
+//           />
+//           <button
+//             onClick={() => downloadAsTextFile(content, filename)}
+//             className="inline-flex items-center gap-1 px-2 py-1 text-xs rounded bg-blue-100 hover:bg-blue-200 text-blue-700 border border-blue-300 transition-colors"
+//             title="Download as text file"
+//           >
+//             <Download size={12} />
+//             Download
+//           </button>
+//         </div>
+//       </div>
+
+//       <div className="mb-2 p-2 bg-blue-50 rounded border border-blue-200">
+//         <p className="text-xs text-blue-800">
+//           <strong>Usage:</strong> {usage}
+//         </p>
+//       </div>
+
+//       <p className="text-xs text-gray-600 mb-3">{description}</p>
+
+//       <div className="bg-gray-900 text-green-400 p-3 rounded-md font-mono text-xs overflow-x-auto max-h-48 overflow-y-auto">
+//         <pre className="whitespace-pre-wrap break-all">{content}</pre>
+//       </div>
+//     </div>
+//   );
+
+//   const generateCertificate = async () => {
+//     if (!domain || !email) return;
+
+//     setLoading(true);
+//     setResult(null);
+
+//     try {
+//       const endpoint =
+//         generationType === "automatic"
+//           ? "/api/generate-cert-automatic"
+//           : "/api/generate-cert";
+//       const response = await fetch(endpoint, {
+//         method: "POST",
+//         headers: {
+//           "Content-Type": "application/json",
+//         },
+//         body: JSON.stringify({
+//           domain,
+//           email,
+//           includeWildcard,
+//         }),
+//       });
+
+//       const data = await response.json();
+//       setResult(data);
+//     } catch (error) {
+//       setResult({
+//         success: false,
+//         error:
+//           "Failed to connect to server. Please check your connection and try again.",
+//       });
+//     } finally {
+//       setLoading(false);
+//     }
+//   };
+
+//   return (
+//     <div className="min-h-screen bg-gradient-to-br from-blue-50 via-white to-purple-50 p-4">
+//       <div className="max-w-6xl mx-auto">
+//         {/* Header */}
+//         <div className="text-center mb-8">
+//           <div className="flex items-center justify-center gap-2 mb-4">
+//             <Shield className="w-8 h-8 text-blue-600" />
+//             <h1 className="text-3xl font-bold text-gray-900">
+//               Let's Encrypt SSL Generator
+//             </h1>
+//           </div>
+//           <p className="text-gray-600">
+//             Generate free SSL certificates for any server, hosting provider, or
+//             control panel
+//           </p>
+//         </div>
+
+//         {/* Form */}
+//         <div className="bg-white rounded-lg shadow-lg p-6 mb-6">
+//           <div className="space-y-4">
+//             {/* Generation Type Selection */}
+//             <div>
+//               <label className="text-sm font-medium text-gray-700 mb-3 block">
+//                 Certificate Generation Method
+//               </label>
+//               <div className="grid md:grid-cols-2 gap-4">
+//                 <div
+//                   className={`border-2 rounded-lg p-4 cursor-pointer transition-all ${
+//                     generationType === "manual"
+//                       ? "border-blue-500 bg-blue-50"
+//                       : "border-gray-200 hover:border-gray-300"
+//                   }`}
+//                   onClick={() => setGenerationType("manual")}
+//                 >
+//                   <div className="flex items-center gap-2 mb-2">
+//                     <Settings size={20} className="text-blue-600" />
+//                     <h4 className="font-medium">Manual DNS Verification</h4>
+//                   </div>
+//                   <p className="text-sm text-gray-600">
+//                     Get DNS verification instructions. You add TXT records
+//                     manually and run commands on your server.
+//                   </p>
+//                   <div className="mt-2 text-xs text-gray-500">
+//                     Best for: Self-managed servers, VPS, dedicated servers
+//                   </div>
+//                 </div>
+
+//                 <div
+//                   className={`border-2 rounded-lg p-4 cursor-pointer transition-all ${
+//                     generationType === "automatic"
+//                       ? "border-blue-500 bg-blue-50"
+//                       : "border-gray-200 hover:border-gray-300"
+//                   }`}
+//                   onClick={() => setGenerationType("automatic")}
+//                 >
+//                   <div className="flex items-center gap-2 mb-2">
+//                     <Server size={20} className="text-blue-600" />
+//                     <h4 className="font-medium">Automatic Generation</h4>
+//                   </div>
+//                   <p className="text-sm text-gray-600">
+//                     Generate certificates automatically with downloadable files
+//                     for hosting control panels.
+//                   </p>
+//                   <div className="mt-2 text-xs text-gray-500">
+//                     Best for: cPanel, Plesk, shared hosting, manual installation
+//                   </div>
+//                 </div>
+//               </div>
+//             </div>
+
+//             <div className="grid md:grid-cols-2 gap-4">
+//               <div>
+//                 <label className="flex items-center gap-2 text-sm font-medium text-gray-700 mb-2">
+//                   <Globe size={16} />
+//                   Domain Name
+//                 </label>
+//                 <input
+//                   type="text"
+//                   value={domain}
+//                   onChange={(e) => setDomain(e.target.value)}
+//                   placeholder="example.com"
+//                   className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+//                   required
+//                 />
+//               </div>
+
+//               <div>
+//                 <label className="flex items-center gap-2 text-sm font-medium text-gray-700 mb-2">
+//                   <Mail size={16} />
+//                   Email Address
+//                 </label>
+//                 <input
+//                   type="email"
+//                   value={email}
+//                   onChange={(e) => setEmail(e.target.value)}
+//                   placeholder="admin@example.com"
+//                   className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+//                   required
+//                 />
+//               </div>
+//             </div>
+
+//             <div className="flex items-center gap-2">
+//               <input
+//                 type="checkbox"
+//                 id="wildcard"
+//                 checked={includeWildcard}
+//                 onChange={(e) => setIncludeWildcard(e.target.checked)}
+//                 className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+//               />
+//               <label htmlFor="wildcard" className="text-sm text-gray-700">
+//                 Include wildcard certificate (*.{domain || "example.com"})
+//               </label>
+//             </div>
+
+//             <button
+//               onClick={generateCertificate}
+//               disabled={loading || !domain || !email}
+//               className="w-full bg-gradient-to-r from-blue-600 to-purple-600 text-white font-semibold py-3 px-6 rounded-md hover:from-blue-700 hover:to-purple-700 focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed transition-all"
+//             >
+//               {loading
+//                 ? "Processing..."
+//                 : `Generate SSL Certificate (${
+//                     generationType === "manual" ? "Manual" : "Automatic"
+//                   })`}
+//             </button>
+//           </div>
+//         </div>
+
+//         {/* Results */}
+//         {result && (
+//           <div className="space-y-6">
+//             {result.success ? (
+//               <>
+//                 {/* DNS Records for Verification */}
+//                 {result.dnsRecords && result.dnsRecords.length > 0 && (
+//                   <div className="bg-white rounded-lg shadow-lg p-6">
+//                     <h4 className="text-lg font-bold text-gray-800 mb-4 flex items-center gap-2">
+//                       <Globe size={20} />
+//                       DNS Verification Required
+//                     </h4>
+
+//                     <div className="mb-4 p-4 bg-yellow-50 border border-yellow-200 rounded-lg">
+//                       <p className="text-sm text-yellow-800">
+//                         <strong>Step 1:</strong> Add these DNS TXT records to
+//                         your domain's DNS settings
+//                       </p>
+//                     </div>
+
+//                     <div className="space-y-4">
+//                       {result.dnsRecords.map((record, index) => (
+//                         <div
+//                           key={index}
+//                           className="border border-gray-200 rounded-lg p-4 bg-gray-50"
+//                         >
+//                           <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+//                             <div>
+//                               <label className="text-xs font-medium text-gray-600 uppercase tracking-wide">
+//                                 Record Name
+//                               </label>
+//                               <div className="flex items-center gap-2 mt-1">
+//                                 <code className="bg-white px-2 py-1 rounded border text-sm font-mono flex-1 break-all">
+//                                   {record.name}
+//                                 </code>
+//                                 <CopyButton
+//                                   text={record.name}
+//                                   itemId={`name-${index}`}
+//                                 />
+//                               </div>
+//                             </div>
+
+//                             <div>
+//                               <label className="text-xs font-medium text-gray-600 uppercase tracking-wide">
+//                                 Record Type
+//                               </label>
+//                               <div className="flex items-center gap-2 mt-1">
+//                                 <code className="bg-white px-2 py-1 rounded border text-sm font-mono flex-1">
+//                                   {record.type}
+//                                 </code>
+//                                 <CopyButton
+//                                   text={record.type}
+//                                   itemId={`type-${index}`}
+//                                 />
+//                               </div>
+//                             </div>
+
+//                             <div>
+//                               <label className="text-xs font-medium text-gray-600 uppercase tracking-wide">
+//                                 Record Value
+//                               </label>
+//                               <div className="flex items-center gap-2 mt-1">
+//                                 <code className="bg-white px-2 py-1 rounded border text-sm font-mono flex-1 break-all">
+//                                   {record.value}
+//                                 </code>
+//                                 <CopyButton
+//                                   text={record.value}
+//                                   itemId={`value-${index}`}
+//                                 />
+//                               </div>
+//                             </div>
+//                           </div>
+//                         </div>
+//                       ))}
+//                     </div>
+//                   </div>
+//                 )}
+
+//                 {/* Server Command */}
+//                 {result.serverCommand && (
+//                   <div className="bg-white rounded-lg shadow-lg p-6">
+//                     <h4 className="text-lg font-bold text-gray-800 mb-4 flex items-center gap-2">
+//                       <Terminal size={20} />
+//                       Server Command
+//                     </h4>
+//                     <div className="bg-gray-900 text-green-400 p-4 rounded-md font-mono text-sm relative">
+//                       <pre className="whitespace-pre-wrap break-all">
+//                         {result.serverCommand}
+//                       </pre>
+//                       <div className="absolute top-2 right-2">
+//                         <CopyButton
+//                           text={result.serverCommand}
+//                           itemId="server-command"
+//                           className="bg-gray-800 hover:bg-gray-700 text-gray-300"
+//                         />
+//                       </div>
+//                     </div>
+//                     <div className="mt-3 p-3 bg-blue-50 border border-blue-200 rounded">
+//                       <p className="text-sm text-blue-800">
+//                         <strong>Step 2:</strong> After adding DNS records, run
+//                         this command on your server and press Enter when
+//                         prompted.
+//                       </p>
+//                     </div>
+//                   </div>
+//                 )}
+
+//                 {/* Certificate Files (for automatic generation) */}
+//                 {result.certificateFiles && (
+//                   <div className="bg-white rounded-lg shadow-lg p-6">
+//                     <div className="flex items-center justify-between mb-4">
+//                       <h4 className="text-lg font-bold text-gray-800 flex items-center gap-2">
+//                         <Award size={20} />
+//                         Generated SSL Certificates
+//                       </h4>
+//                       <button
+//                         onClick={downloadAllCertificates}
+//                         className="flex items-center gap-2 px-4 py-2 bg-purple-600 text-white rounded-md hover:bg-purple-700 transition-colors"
+//                       >
+//                         <Download size={16} />
+//                         Download All as Text Files
+//                       </button>
+//                     </div>
+
+//                     <div className="grid gap-6">
+//                       {/* Full Chain Certificate */}
+//                       {result.certificateFiles.fullchain && (
+//                         <CertificateFileCard
+//                           title="Certificate (CRT) - Full Chain"
+//                           content={result.certificateFiles.fullchain}
+//                           filename={`${domain}_fullchain.txt`}
+//                           icon={Award}
+//                           description="Complete certificate chain including intermediates. This is the most commonly used certificate file."
+//                           usage="Use for Nginx, most hosting control panels, and cPanel Certificate (CRT) field"
+//                         />
+//                       )}
+
+//                       {/* Private Key */}
+//                       {result.certificateFiles.privkey && (
+//                         <CertificateFileCard
+//                           title="Private Key (KEY)"
+//                           content={result.certificateFiles.privkey}
+//                           filename={`${domain}_privkey.txt`}
+//                           icon={Key}
+//                           description="Your private key - KEEP THIS SECURE! Never share this file publicly or commit to version control."
+//                           usage="Use for server configurations and hosting control panel Private Key (KEY) field"
+//                         />
+//                       )}
+
+//                       {/* Certificate Only */}
+//                       {result.certificateFiles.cert && (
+//                         <CertificateFileCard
+//                           title="Certificate Only"
+//                           content={result.certificateFiles.cert}
+//                           filename={`${domain}_cert.txt`}
+//                           icon={FileText}
+//                           description="Your domain certificate without intermediate certificates."
+//                           usage="Use for Apache SSLCertificateFile or when intermediate certificates are handled separately"
+//                         />
+//                       )}
+
+//                       {/* Certificate Chain */}
+//                       {result.certificateFiles.chain && (
+//                         <CertificateFileCard
+//                           title="Certificate Authority Bundle (CABUNDLE)"
+//                           content={result.certificateFiles.chain}
+//                           filename={`${domain}_chain.txt`}
+//                           icon={FileText}
+//                           description="Intermediate certificates that establish the certificate chain of trust."
+//                           usage="Use for hosting control panels CABUNDLE field or Apache SSLCertificateChainFile"
+//                         />
+//                       )}
+//                     </div>
+
+//                     {/* Installation Instructions */}
+//                     <div className="mt-6 grid md:grid-cols-2 gap-4">
+//                       {/* Hosting Control Panel */}
+//                       <div className="p-4 bg-blue-50 border border-blue-200 rounded-lg">
+//                         <h5 className="font-semibold text-blue-900 mb-3">
+//                           For Hosting Control Panels (cPanel, Plesk)
+//                         </h5>
+//                         <ol className="text-sm text-blue-800 space-y-1 list-decimal list-inside">
+//                           <li>Go to SSL/TLS section</li>
+//                           <li>
+//                             Upload or paste <strong>Full Chain</strong>{" "}
+//                             certificate
+//                           </li>
+//                           <li>
+//                             Upload or paste <strong>Private Key</strong>
+//                           </li>
+//                           <li>
+//                             Upload or paste <strong>CA Bundle</strong> if
+//                             required
+//                           </li>
+//                           <li>Install and activate</li>
+//                         </ol>
+//                       </div>
+
+//                       {/* Server Configuration */}
+//                       <div className="p-4 bg-green-50 border border-green-200 rounded-lg">
+//                         <h5 className="font-semibold text-green-900 mb-3">
+//                           For Direct Server Installation
+//                         </h5>
+//                         <ol className="text-sm text-green-800 space-y-1 list-decimal list-inside">
+//                           <li>Upload certificate files to your server</li>
+//                           <li>Configure web server (Nginx/Apache)</li>
+//                           <li>
+//                             Use <strong>Full Chain</strong> for ssl_certificate
+//                           </li>
+//                           <li>
+//                             Use <strong>Private Key</strong> for
+//                             ssl_certificate_key
+//                           </li>
+//                           <li>Restart web server</li>
+//                         </ol>
+//                       </div>
+//                     </div>
+//                   </div>
+//                 )}
+
+//                 {/* Instructions */}
+//                 {result.instructions && (
+//                   <div className="bg-white rounded-lg shadow-lg p-6">
+//                     <h4 className="text-lg font-bold text-gray-800 mb-4">
+//                       Next Steps
+//                     </h4>
+//                     <div className="space-y-3">
+//                       {result.instructions.map((instruction, index) => (
+//                         <div
+//                           key={index}
+//                           className="flex items-start gap-3 p-3 bg-gray-50 rounded border"
+//                         >
+//                           <div className="flex-shrink-0 w-6 h-6 bg-blue-600 text-white text-sm font-bold rounded-full flex items-center justify-center">
+//                             {index + 1}
+//                           </div>
+//                           <p className="text-sm text-gray-700">{instruction}</p>
+//                         </div>
+//                       ))}
+//                     </div>
+//                   </div>
+//                 )}
+
+//                 {/* Message */}
+//                 <div className="bg-white rounded-lg shadow-lg p-6">
+//                   <div className="flex items-center gap-2 text-green-700 mb-2">
+//                     <Check className="w-5 h-5" />
+//                     <h3 className="font-semibold">Success</h3>
+//                   </div>
+//                   <p className="text-green-800">{result.message}</p>
+//                   {result.note && (
+//                     <div className="mt-3 p-3 bg-yellow-50 border border-yellow-200 rounded">
+//                       <p className="text-sm text-yellow-800">
+//                         <strong>Note:</strong> {result.note}
+//                       </p>
+//                     </div>
+//                   )}
+//                 </div>
+//               </>
+//             ) : (
+//               <div className="bg-white rounded-lg shadow-lg p-6">
+//                 <div className="flex items-center gap-2 text-red-700 mb-4">
+//                   <AlertCircle className="w-5 h-5" />
+//                   <h3 className="text-lg font-semibold">
+//                     Certificate Generation Failed
+//                   </h3>
+//                 </div>
+//                 <div className="bg-red-50 border border-red-200 text-red-800 p-3 rounded-md">
+//                   <strong>Error:</strong> {result.error}
+//                 </div>
+//                 {result.troubleshooting && (
+//                   <div className="mt-4">
+//                     <h5 className="font-medium text-gray-800 mb-2">
+//                       Troubleshooting Tips:
+//                     </h5>
+//                     <ul className="text-sm text-gray-600 space-y-1 list-disc list-inside">
+//                       {result.troubleshooting.map((tip, index) => (
+//                         <li key={index}>{tip}</li>
+//                       ))}
+//                     </ul>
+//                   </div>
+//                 )}
+//               </div>
+//             )}
+
+//             <button
+//               onClick={() => {
+//                 setResult(null);
+//                 setDomain("");
+//                 setEmail("");
+//                 setIncludeWildcard(false);
+//               }}
+//               className="w-full bg-gray-600 text-white px-4 py-2 rounded-md hover:bg-gray-700 transition-colors"
+//             >
+//               Generate Another Certificate
+//             </button>
+//           </div>
+//         )}
+//       </div>
+//     </div>
+//   );
+// };
+
+// export default SSLGenerator;
 
 // "use client";
 // import React, { useState } from "react";
