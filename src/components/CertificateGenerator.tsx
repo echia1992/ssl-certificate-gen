@@ -116,7 +116,15 @@ export default function SSLAsServiceGenerator() {
   };
 
   const completeCertificate = async () => {
-    if (!challengeData || !dnsVerified) return;
+    if (!challengeData) return;
+
+    // Check if DNS has been verified through the verification button
+    if (!dnsVerified) {
+      setError(
+        "Please verify DNS records first by clicking 'Verify DNS Records' button."
+      );
+      return;
+    }
 
     setLoading(true);
     setError("");
@@ -131,6 +139,7 @@ export default function SSLAsServiceGenerator() {
           includeWildcard,
           step: "complete-certificate",
           challengeToken: challengeData.challengeToken,
+          dnsVerified: true, // Pass verification status to backend
         }),
       });
 
@@ -783,6 +792,791 @@ export default function SSLAsServiceGenerator() {
     </div>
   );
 }
+// "use client";
+
+// import React, { useState } from "react";
+// import {
+//   Clock,
+//   AlertCircle,
+//   ExternalLink,
+//   CheckCircle,
+//   XCircle,
+//   RefreshCw,
+// } from "lucide-react";
+
+// interface DnsRecord {
+//   name: string;
+//   type: string;
+//   value: string;
+//   ttl: number;
+// }
+
+// interface Certificates {
+//   certificate: string;
+//   privateKey: string;
+//   caBundle: string;
+//   fullChain: string;
+// }
+
+// interface ChallengeData {
+//   domain: string;
+//   email: string;
+//   dnsRecords: DnsRecord[];
+//   challengeToken: string;
+//   instructions: string[];
+// }
+
+// export default function SSLAsServiceGenerator() {
+//   const [step, setStep] = useState(1);
+//   const [domain, setDomain] = useState("");
+//   const [email, setEmail] = useState("");
+//   const [includeWildcard, setIncludeWildcard] = useState(true);
+//   const [loading, setLoading] = useState(false);
+//   const [challengeData, setChallengeData] = useState<ChallengeData | null>(
+//     null
+//   );
+//   const [certificates, setCertificates] = useState<Certificates | null>(null);
+//   const [error, setError] = useState<string>("");
+//   const [dnsVerified, setDnsVerified] = useState(false);
+//   const [dnsVerifying, setDnsVerifying] = useState(false);
+//   const [dnsVerificationResults, setDnsVerificationResults] = useState<{
+//     [key: string]: boolean;
+//   }>({});
+//   const [verificationAttempts, setVerificationAttempts] = useState(0);
+
+//   const CopyButton = ({ text, label }: { text: string; label: string }) => {
+//     const [copied, setCopied] = useState(false);
+
+//     const handleCopy = async () => {
+//       try {
+//         await navigator.clipboard.writeText(text);
+//         setCopied(true);
+//         setTimeout(() => setCopied(false), 2000);
+//       } catch (err) {
+//         console.error("Failed to copy:", err);
+//       }
+//     };
+
+//     return (
+//       <button
+//         onClick={handleCopy}
+//         className="px-3 py-1 bg-blue-600 text-white text-sm rounded hover:bg-blue-700 transition-colors"
+//       >
+//         {copied ? "✅ Copied!" : `📋 Copy ${label}`}
+//       </button>
+//     );
+//   };
+
+//   const generateChallenge = async () => {
+//     setLoading(true);
+//     setError("");
+
+//     try {
+//       const response = await fetch("/api/ssl-as-service", {
+//         method: "POST",
+//         headers: { "Content-Type": "application/json" },
+//         body: JSON.stringify({
+//           domain,
+//           email,
+//           includeWildcard,
+//           step: "generate-challenge",
+//         }),
+//       });
+
+//       const data = await response.json();
+
+//       if (data.success) {
+//         setChallengeData({
+//           domain: data.domain,
+//           email: email,
+//           dnsRecords: data.dnsRecords,
+//           challengeToken: data.challengeToken,
+//           instructions: data.instructions,
+//         });
+//         // Reset DNS verification when new challenge is generated
+//         setDnsVerified(false);
+//         setDnsVerifying(false);
+//         setDnsVerificationResults({});
+//         setVerificationAttempts(0);
+//         setStep(2);
+//       } else {
+//         setError(data.error);
+//       }
+//     } catch (err) {
+//       setError("Failed to generate challenge. Please try again.");
+//     } finally {
+//       setLoading(false);
+//     }
+//   };
+
+//   const completeCertificate = async () => {
+//     if (!challengeData || !dnsVerified) return;
+
+//     setLoading(true);
+//     setError("");
+
+//     try {
+//       const response = await fetch("/api/ssl-as-service", {
+//         method: "POST",
+//         headers: { "Content-Type": "application/json" },
+//         body: JSON.stringify({
+//           domain: challengeData.domain,
+//           email: challengeData.email,
+//           includeWildcard,
+//           step: "complete-certificate",
+//           challengeToken: challengeData.challengeToken,
+//         }),
+//       });
+
+//       const data = await response.json();
+
+//       if (data.success) {
+//         setCertificates(data.certificates);
+//         setStep(3);
+//       } else {
+//         setError(data.error);
+//       }
+//     } catch (err) {
+//       setError("Failed to complete certificate generation. Please try again.");
+//     } finally {
+//       setLoading(false);
+//     }
+//   };
+
+//   const verifyDNS = async () => {
+//     if (!challengeData) return;
+
+//     setDnsVerifying(true);
+//     setError("");
+//     setVerificationAttempts((prev) => prev + 1);
+
+//     try {
+//       // Use backend DNS verification instead of frontend-only
+//       const response = await fetch("/api/ssl-as-service", {
+//         method: "POST",
+//         headers: { "Content-Type": "application/json" },
+//         body: JSON.stringify({
+//           domain: challengeData.domain,
+//           email: challengeData.email,
+//           step: "verify-dns",
+//           challengeToken: challengeData.challengeToken,
+//         }),
+//       });
+
+//       const data = await response.json();
+
+//       if (data.success) {
+//         setDnsVerificationResults(data.results || {});
+//         setDnsVerified(data.verified);
+
+//         if (data.verified) {
+//           setError("");
+//         } else {
+//           const failedRecords = Object.entries(data.results || {})
+//             .filter(([_, verified]) => !verified)
+//             .map(([name]) => name);
+
+//           setError(
+//             `DNS records not yet propagated for: ${failedRecords.join(
+//               ", "
+//             )}. Please wait a few more minutes and try again. This is attempt ${
+//               verificationAttempts + 1
+//             }.`
+//           );
+//         }
+//       } else {
+//         setError(data.error || "DNS verification failed");
+//         setDnsVerified(false);
+//       }
+//     } catch (error) {
+//       console.error("DNS verification error:", error);
+//       setError(
+//         "Failed to verify DNS records. Please check your internet connection and try again."
+//       );
+//       setDnsVerified(false);
+//     } finally {
+//       setDnsVerifying(false);
+//     }
+//   };
+
+//   const resetProcess = () => {
+//     setStep(1);
+//     setDomain("");
+//     setEmail("");
+//     setIncludeWildcard(true);
+//     setChallengeData(null);
+//     setCertificates(null);
+//     setError("");
+//     setLoading(false);
+//     setDnsVerified(false);
+//     setDnsVerifying(false);
+//     setDnsVerificationResults({});
+//     setVerificationAttempts(0);
+//   };
+
+//   return (
+//     <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 py-8 px-4">
+//       <div className="max-w-4xl mx-auto">
+//         <div className="text-center mb-8">
+//           <h1 className="text-3xl font-bold text-gray-800 mb-2">
+//             🔒 SSL Certificate Generator Service
+//           </h1>
+//           <p className="text-gray-600">
+//             Generate free SSL certificates for any domain - Download and install
+//             on your hosting provider
+//           </p>
+//         </div>
+
+//         {/* Progress Steps */}
+//         <div className="flex items-center justify-center mb-8 space-x-4">
+//           <div
+//             className={`flex items-center space-x-2 ${
+//               step >= 1 ? "text-blue-600" : "text-gray-400"
+//             }`}
+//           >
+//             <div
+//               className={`w-8 h-8 rounded-full border-2 flex items-center justify-center text-sm font-semibold ${
+//                 step >= 1
+//                   ? "bg-blue-600 text-white border-blue-600"
+//                   : "border-gray-300"
+//               }`}
+//             >
+//               1
+//             </div>
+//             <span className="font-medium">Domain Setup</span>
+//           </div>
+
+//           <div
+//             className={`w-12 h-0.5 ${
+//               step >= 2 ? "bg-blue-600" : "bg-gray-300"
+//             }`}
+//           ></div>
+
+//           <div
+//             className={`flex items-center space-x-2 ${
+//               step >= 2 ? "text-blue-600" : "text-gray-400"
+//             }`}
+//           >
+//             <div
+//               className={`w-8 h-8 rounded-full border-2 flex items-center justify-center text-sm font-semibold ${
+//                 step >= 2
+//                   ? "bg-blue-600 text-white border-blue-600"
+//                   : "border-gray-300"
+//               }`}
+//             >
+//               2
+//             </div>
+//             <span className="font-medium">DNS Verification</span>
+//           </div>
+
+//           <div
+//             className={`w-12 h-0.5 ${
+//               step >= 3 ? "bg-blue-600" : "bg-gray-300"
+//             }`}
+//           ></div>
+
+//           <div
+//             className={`flex items-center space-x-2 ${
+//               step >= 3 ? "text-blue-600" : "text-gray-400"
+//             }`}
+//           >
+//             <div
+//               className={`w-8 h-8 rounded-full border-2 flex items-center justify-center text-sm font-semibold ${
+//                 step >= 3
+//                   ? "bg-blue-600 text-white border-blue-600"
+//                   : "border-gray-300"
+//               }`}
+//             >
+//               3
+//             </div>
+//             <span className="font-medium">Download SSL</span>
+//           </div>
+//         </div>
+
+//         {/* Error Display */}
+//         {error && (
+//           <div className="mb-6 p-4 bg-red-50 border border-red-200 rounded-lg">
+//             <div className="flex items-center">
+//               <AlertCircle className="w-5 h-5 text-red-600 mr-2" />
+//               <h4 className="font-semibold text-red-800">Error</h4>
+//             </div>
+//             <p className="text-red-700 mt-1">{error}</p>
+//           </div>
+//         )}
+
+//         {/* Step 1: Domain Input */}
+//         {step === 1 && (
+//           <div className="bg-white rounded-lg shadow-lg p-6">
+//             <h3 className="text-lg font-bold text-gray-800 mb-4">
+//               Step 1: Enter Your Domain
+//             </h3>
+
+//             <div className="space-y-4">
+//               <div>
+//                 <label className="block text-sm font-medium text-gray-700 mb-2">
+//                   Domain Name
+//                 </label>
+//                 <input
+//                   type="text"
+//                   value={domain}
+//                   onChange={(e) =>
+//                     setDomain(e.target.value.trim().toLowerCase())
+//                   }
+//                   placeholder="example.com"
+//                   className="w-full px-4 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+//                 />
+//                 <p className="text-sm text-gray-500 mt-1">
+//                   Enter the domain where you want to install the SSL certificate
+//                   (without www or https)
+//                 </p>
+//               </div>
+
+//               <div>
+//                 <label className="block text-sm font-medium text-gray-700 mb-2">
+//                   Email Address
+//                 </label>
+//                 <input
+//                   type="email"
+//                   value={email}
+//                   onChange={(e) => setEmail(e.target.value.trim())}
+//                   placeholder="your@email.com"
+//                   className="w-full px-4 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+//                 />
+//                 <p className="text-sm text-gray-500 mt-1">
+//                   Required for Let's Encrypt notifications and certificate
+//                   management
+//                 </p>
+//               </div>
+
+//               <div className="flex items-center">
+//                 <input
+//                   type="checkbox"
+//                   id="wildcard"
+//                   checked={includeWildcard}
+//                   onChange={(e) => setIncludeWildcard(e.target.checked)}
+//                   className="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300 rounded"
+//                 />
+//                 <label
+//                   htmlFor="wildcard"
+//                   className="ml-2 text-sm text-gray-700"
+//                 >
+//                   Include wildcard certificate (*.{domain || "example.com"})
+//                 </label>
+//               </div>
+
+//               <div className="p-4 bg-blue-50 border border-blue-200 rounded-lg">
+//                 <h4 className="font-semibold text-blue-800 mb-2">
+//                   📋 What You'll Need:
+//                 </h4>
+//                 <ul className="text-sm text-blue-700 space-y-1 list-disc list-inside">
+//                   <li>Access to your domain's DNS settings</li>
+//                   <li>Ability to add TXT records to your DNS</li>
+//                   <li>A valid email address for SSL notifications</li>
+//                   <li>Access to your hosting control panel (cPanel, etc.)</li>
+//                   <li>5-10 minutes for DNS propagation</li>
+//                 </ul>
+//               </div>
+
+//               <button
+//                 onClick={generateChallenge}
+//                 disabled={!domain || !email || loading}
+//                 className="w-full px-6 py-3 bg-blue-600 text-white font-semibold rounded-md hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+//               >
+//                 {loading ? (
+//                   <div className="flex items-center justify-center">
+//                     <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-white mr-2"></div>
+//                     Generating DNS Challenge...
+//                   </div>
+//                 ) : (
+//                   "Generate DNS Challenge"
+//                 )}
+//               </button>
+//             </div>
+//           </div>
+//         )}
+
+//         {/* Step 2: DNS Setup with Verification */}
+//         {step === 2 && challengeData && (
+//           <div className="bg-white rounded-lg shadow-lg p-6">
+//             <h3 className="text-lg font-bold text-gray-800 mb-4">
+//               Step 2: DNS Setup & Verification for {challengeData.domain}
+//             </h3>
+
+//             <div className="mb-6 p-4 bg-yellow-50 border border-yellow-200 rounded-lg">
+//               <h4 className="font-semibold text-yellow-800 mb-2">
+//                 ⚠️ Important Instructions:
+//               </h4>
+//               <ol className="text-sm text-yellow-700 space-y-1 list-decimal list-inside">
+//                 <li>Add the TXT record(s) shown below to your DNS provider</li>
+//                 <li>Wait 5-10 minutes for DNS propagation</li>
+//                 <li>Click "Verify DNS Records" to check if they're live</li>
+//                 <li>Only proceed when all records are verified ✅</li>
+//               </ol>
+//             </div>
+
+//             <div className="space-y-4">
+//               {challengeData.dnsRecords.map((record, index) => (
+//                 <div
+//                   key={index}
+//                   className="border border-gray-200 rounded-lg p-4"
+//                 >
+//                   <div className="flex items-center justify-between mb-3">
+//                     <h5 className="font-semibold text-gray-800">
+//                       DNS Record #{index + 1}
+//                     </h5>
+//                     {Object.keys(dnsVerificationResults).length > 0 && (
+//                       <div className="flex items-center">
+//                         {dnsVerificationResults[record.name] ? (
+//                           <div className="flex items-center text-green-600">
+//                             <CheckCircle className="w-4 h-4 mr-1" />
+//                             <span className="text-sm font-medium">
+//                               Verified
+//                             </span>
+//                           </div>
+//                         ) : (
+//                           <div className="flex items-center text-red-600">
+//                             <XCircle className="w-4 h-4 mr-1" />
+//                             <span className="text-sm font-medium">
+//                               Not Found
+//                             </span>
+//                           </div>
+//                         )}
+//                       </div>
+//                     )}
+//                   </div>
+
+//                   <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-sm">
+//                     <div>
+//                       <label className="block font-medium text-gray-700 mb-1">
+//                         Name/Host:
+//                       </label>
+//                       <div className="flex items-center space-x-2">
+//                         <code className="bg-gray-100 px-2 py-1 rounded text-xs font-mono flex-1">
+//                           {record.name}
+//                         </code>
+//                         <CopyButton text={record.name} label="Name" />
+//                       </div>
+//                     </div>
+
+//                     <div>
+//                       <label className="block font-medium text-gray-700 mb-1">
+//                         Type:
+//                       </label>
+//                       <code className="bg-gray-100 px-2 py-1 rounded text-xs font-mono">
+//                         {record.type}
+//                       </code>
+//                     </div>
+
+//                     <div>
+//                       <label className="block font-medium text-gray-700 mb-1">
+//                         TTL:
+//                       </label>
+//                       <code className="bg-gray-100 px-2 py-1 rounded text-xs font-mono">
+//                         {record.ttl}
+//                       </code>
+//                     </div>
+//                   </div>
+
+//                   <div className="mt-3">
+//                     <label className="block font-medium text-gray-700 mb-1">
+//                       Value:
+//                     </label>
+//                     <div className="flex items-center space-x-2">
+//                       <textarea
+//                         value={record.value}
+//                         readOnly
+//                         className="flex-1 bg-gray-100 border border-gray-300 rounded px-2 py-1 text-xs font-mono resize-none h-20"
+//                         onClick={(e) =>
+//                           (e.target as HTMLTextAreaElement).select()
+//                         }
+//                       />
+//                       <CopyButton text={record.value} label="Value" />
+//                     </div>
+//                   </div>
+//                 </div>
+//               ))}
+//             </div>
+
+//             {/* DNS Verification Section */}
+//             <div className="mt-6 p-4 bg-blue-50 border border-blue-200 rounded-lg">
+//               <div className="flex items-center justify-between mb-3">
+//                 <h4 className="font-semibold text-blue-800">
+//                   🔍 DNS Verification
+//                 </h4>
+//                 {verificationAttempts > 0 && (
+//                   <span className="text-sm text-blue-600">
+//                     Attempts: {verificationAttempts}
+//                   </span>
+//                 )}
+//               </div>
+
+//               <div className="flex gap-3 mb-3">
+//                 <button
+//                   onClick={verifyDNS}
+//                   disabled={dnsVerifying}
+//                   className="flex items-center px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:opacity-50 transition-colors"
+//                 >
+//                   {dnsVerifying ? (
+//                     <>
+//                       <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white mr-2"></div>
+//                       Verifying...
+//                     </>
+//                   ) : (
+//                     <>
+//                       <RefreshCw className="w-4 h-4 mr-2" />
+//                       Verify DNS Records
+//                     </>
+//                   )}
+//                 </button>
+
+//                 {Object.keys(dnsVerificationResults).length > 0 && (
+//                   <div className="flex items-center px-3 py-2 rounded-md">
+//                     {dnsVerified ? (
+//                       <div className="flex items-center text-green-600">
+//                         <CheckCircle className="w-5 h-5 mr-2" />
+//                         <span className="font-medium">
+//                           All records verified!
+//                         </span>
+//                       </div>
+//                     ) : (
+//                       <div className="flex items-center text-orange-600">
+//                         <Clock className="w-5 h-5 mr-2" />
+//                         <span className="font-medium">
+//                           Waiting for propagation...
+//                         </span>
+//                       </div>
+//                     )}
+//                   </div>
+//                 )}
+//               </div>
+
+//               <p className="text-sm text-blue-700">
+//                 Click "Verify DNS Records" to check if your TXT records are
+//                 live. This prevents failed certificate attempts and ensures DNS
+//                 is properly configured.
+//               </p>
+//             </div>
+
+//             {/* Action Buttons */}
+//             <div className="flex gap-4 mt-6">
+//               <button
+//                 onClick={completeCertificate}
+//                 disabled={loading || !dnsVerified}
+//                 className="flex-1 px-6 py-3 bg-green-600 text-white font-semibold rounded-md hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+//               >
+//                 {loading ? (
+//                   <div className="flex items-center justify-center">
+//                     <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-white mr-2"></div>
+//                     Generating Certificates...
+//                   </div>
+//                 ) : !dnsVerified ? (
+//                   "⚠️ Verify DNS First"
+//                 ) : (
+//                   "✅ Generate SSL Certificate"
+//                 )}
+//               </button>
+
+//               <button
+//                 onClick={resetProcess}
+//                 disabled={loading}
+//                 className="px-4 py-2 bg-gray-600 text-white rounded-md hover:bg-gray-700 disabled:opacity-50 transition-colors"
+//               >
+//                 Start Over
+//               </button>
+//             </div>
+
+//             {!dnsVerified && Object.keys(dnsVerificationResults).length > 0 && (
+//               <div className="mt-4 p-4 bg-orange-50 border border-orange-200 rounded-lg">
+//                 <p className="text-orange-800 text-sm">
+//                   💡 <strong>Tip:</strong> DNS propagation can take 5-15 minutes
+//                   depending on your provider. Keep clicking "Verify DNS Records"
+//                   until all records show as verified.
+//                 </p>
+//               </div>
+//             )}
+
+//             {loading && (
+//               <div className="mt-4 p-4 bg-blue-50 border border-blue-200 rounded-lg">
+//                 <p className="text-blue-800 text-sm flex items-center">
+//                   <Clock className="w-4 h-4 mr-2" />
+//                   Generating SSL certificates... This may take 2-5 minutes.
+//                 </p>
+//               </div>
+//             )}
+//           </div>
+//         )}
+
+//         {/* Step 3: Download Certificates */}
+//         {step === 3 && certificates && (
+//           <div className="bg-white rounded-lg shadow-lg p-6">
+//             <h3 className="text-lg font-bold text-gray-800 mb-4">
+//               🎉 SSL Certificates Ready for {challengeData?.domain}!
+//             </h3>
+
+//             <div className="mb-6 p-4 bg-green-50 border border-green-200 rounded-lg">
+//               <h4 className="font-semibold text-green-800 mb-2">
+//                 ✅ Installation Instructions
+//               </h4>
+//               <ol className="text-sm text-green-700 space-y-1 list-decimal list-inside">
+//                 <li>Go to your hosting control panel (cPanel, Plesk, etc.)</li>
+//                 <li>Find SSL/TLS Certificate installation section</li>
+//                 <li>
+//                   Copy and paste each certificate section below into the
+//                   corresponding fields
+//                 </li>
+//                 <li>Save/Install the certificate</li>
+//                 <li>Test your SSL with the link provided below</li>
+//               </ol>
+//             </div>
+
+//             <div className="space-y-6">
+//               {/* Certificate sections remain the same */}
+//               <div className="border border-gray-200 rounded-lg">
+//                 <div className="bg-gray-50 px-4 py-2 border-b border-gray-200">
+//                   <div className="flex items-center justify-between">
+//                     <h5 className="font-semibold text-gray-800">
+//                       Certificate (CRT)
+//                     </h5>
+//                     <CopyButton
+//                       text={certificates.certificate}
+//                       label="Certificate"
+//                     />
+//                   </div>
+//                   <p className="text-xs text-gray-600 mt-1">
+//                     Paste this into the "Certificate" or "CRT" field in your
+//                     hosting panel
+//                   </p>
+//                 </div>
+//                 <div className="p-4">
+//                   <textarea
+//                     value={certificates.certificate}
+//                     readOnly
+//                     className="w-full h-32 text-xs font-mono bg-gray-50 border border-gray-200 rounded p-2 resize-none"
+//                     onClick={(e) => (e.target as HTMLTextAreaElement).select()}
+//                   />
+//                 </div>
+//               </div>
+
+//               <div className="border border-gray-200 rounded-lg">
+//                 <div className="bg-gray-50 px-4 py-2 border-b border-gray-200">
+//                   <div className="flex items-center justify-between">
+//                     <h5 className="font-semibold text-gray-800">
+//                       Private Key (KEY)
+//                     </h5>
+//                     <CopyButton
+//                       text={certificates.privateKey}
+//                       label="Private Key"
+//                     />
+//                   </div>
+//                   <p className="text-xs text-gray-600 mt-1">
+//                     Paste this into the "Private Key" or "KEY" field in your
+//                     hosting panel
+//                   </p>
+//                 </div>
+//                 <div className="p-4">
+//                   <textarea
+//                     value={certificates.privateKey}
+//                     readOnly
+//                     className="w-full h-32 text-xs font-mono bg-gray-50 border border-gray-200 rounded p-2 resize-none"
+//                     onClick={(e) => (e.target as HTMLTextAreaElement).select()}
+//                   />
+//                 </div>
+//               </div>
+
+//               <div className="border border-gray-200 rounded-lg">
+//                 <div className="bg-gray-50 px-4 py-2 border-b border-gray-200">
+//                   <div className="flex items-center justify-between">
+//                     <h5 className="font-semibold text-gray-800">
+//                       CA Bundle (CABUNDLE)
+//                     </h5>
+//                     <CopyButton
+//                       text={certificates.caBundle}
+//                       label="CA Bundle"
+//                     />
+//                   </div>
+//                   <p className="text-xs text-gray-600 mt-1">
+//                     Paste this into the "CA Bundle" or "CABUNDLE" field in your
+//                     hosting panel
+//                   </p>
+//                 </div>
+//                 <div className="p-4">
+//                   <textarea
+//                     value={certificates.caBundle}
+//                     readOnly
+//                     className="w-full h-32 text-xs font-mono bg-gray-50 border border-gray-200 rounded p-2 resize-none"
+//                     onClick={(e) => (e.target as HTMLTextAreaElement).select()}
+//                   />
+//                 </div>
+//               </div>
+
+//               <div className="border border-gray-200 rounded-lg">
+//                 <div className="bg-gray-50 px-4 py-2 border-b border-gray-200">
+//                   <div className="flex items-center justify-between">
+//                     <h5 className="font-semibold text-gray-800">
+//                       Full Chain (Alternative)
+//                     </h5>
+//                     <CopyButton
+//                       text={certificates.fullChain}
+//                       label="Full Chain"
+//                     />
+//                   </div>
+//                   <p className="text-xs text-gray-600 mt-1">
+//                     Use this if your hosting provider asks for a single
+//                     certificate file
+//                   </p>
+//                 </div>
+//                 <div className="p-4">
+//                   <textarea
+//                     value={certificates.fullChain}
+//                     readOnly
+//                     className="w-full h-32 text-xs font-mono bg-gray-50 border border-gray-200 rounded p-2 resize-none"
+//                     onClick={(e) => (e.target as HTMLTextAreaElement).select()}
+//                   />
+//                 </div>
+//               </div>
+//             </div>
+
+//             <div className="mt-6 p-4 bg-yellow-50 border border-yellow-200 rounded-lg">
+//               <h4 className="font-semibold text-yellow-800 mb-2">
+//                 🔒 Security Notes
+//               </h4>
+//               <ul className="text-sm text-yellow-700 space-y-1 list-disc list-inside">
+//                 <li>
+//                   Keep your Private Key secure and never share it publicly
+//                 </li>
+//                 <li>These certificates are valid for 90 days</li>
+//                 <li>Set up automatic renewal before expiration</li>
+//                 <li>After installation, test your SSL configuration</li>
+//               </ul>
+//             </div>
+
+//             <div className="flex gap-4 mt-6">
+//               <button
+//                 onClick={resetProcess}
+//                 className="px-6 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 transition-colors"
+//               >
+//                 Generate Another Certificate
+//               </button>
+
+//               <button
+//                 onClick={() =>
+//                   window.open(
+//                     `https://www.ssllabs.com/ssltest/analyze.html?d=${challengeData?.domain}`,
+//                     "_blank"
+//                   )
+//                 }
+//                 className="px-6 py-2 bg-green-600 text-white rounded-md hover:bg-green-700 transition-colors flex items-center"
+//               >
+//                 <ExternalLink className="w-4 h-4 mr-2" />
+//                 Test SSL Installation
+//               </button>
+//             </div>
+//           </div>
+//         )}
+//       </div>
+//     </div>
+//   );
+// }
 
 // //certificate-gen and dns verification
 // "use client";
