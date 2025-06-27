@@ -396,7 +396,8 @@ exit 0
             "✅ Fallback succeeded:",
             fallbackOutput.substring(0, 200)
           );
-          //   certificatePath = `/etc/letsencrypt/live/${fallbackCertName}`;
+          let certificatePath = `/etc/letsencrypt/live/${certName}`;
+          certificatePath = `/etc/letsencrypt/live/${fallbackCertName}`;
         } catch (fallbackError) {
           throw new Error(
             `Both wildcard and single domain DNS challenge failed. Primary error: ${
@@ -518,7 +519,6 @@ setInterval(() => {
     }
   }
 }, 300000); // Clean up every 5 minutes
-
 // // app/api/ssl-as-service/route.ts - PRODUCTION READY VERSION
 // import { NextRequest, NextResponse } from "next/server";
 // import { readFileSync, existsSync, writeFileSync, mkdirSync } from "fs";
