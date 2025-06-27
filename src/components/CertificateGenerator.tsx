@@ -1,12 +1,7 @@
+"use client";
+
 import React, { useState } from "react";
-import {
-  CheckCircle,
-  Clock,
-  AlertCircle,
-  Download,
-  Copy,
-  ExternalLink,
-} from "lucide-react";
+import { Clock, AlertCircle, ExternalLink } from "lucide-react";
 
 interface DnsRecord {
   name: string;
