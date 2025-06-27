@@ -1,13 +1,14 @@
 // app/api/ssl-as-service/route.ts
 import { NextRequest, NextResponse } from "next/server";
-import { readFileSync, existsSync } from "fs";
+import { readFileSync, existsSync, writeFileSync, mkdirSync } from "fs";
 import path from "path";
+import { execSync } from "child_process";
 
 interface SSLServiceRequest {
   domain: string;
   email: string;
   includeWildcard?: boolean;
-  step: "generate-challenge" | "complete-certificate";
+  step: "generate-challenge" | "complete-certificate" | "verify-dns";
   challengeToken?: string;
 }
 
@@ -24,6 +25,15 @@ interface ChallengeResponse {
   challengeToken: string;
   instructions: string[];
   nextStep: string;
+}
+
+interface VerificationResponse {
+  success: true;
+  step: "dns-verification";
+  domain: string;
+  verified: boolean;
+  results: { [key: string]: boolean };
+  message: string;
 }
 
 interface CertificateResponse {
@@ -47,8 +57,12 @@ interface ErrorResponse {
 
 type SSLServiceResponse =
   | ChallengeResponse
+  | VerificationResponse
   | CertificateResponse
   | ErrorResponse;
+
+// Store challenge data temporarily (in production, use Redis or database)
+const challengeStore = new Map<string, any>();
 
 export async function POST(
   request: NextRequest
@@ -56,45 +70,8 @@ export async function POST(
   console.log("🚀 SSL Service API called");
 
   try {
-    // Get raw body first to debug
-    const rawBody = await request.text();
-    console.log("📋 Raw request body:", JSON.stringify(rawBody));
-    console.log("📋 Raw body length:", rawBody.length);
-    console.log(
-      "📋 Raw body chars:",
-      rawBody
-        .split("")
-        .map((c) => `${c}(${c.charCodeAt(0)})`)
-        .join(" ")
-    );
-
-    // Try to parse JSON
-    let body: SSLServiceRequest;
-    try {
-      body = JSON.parse(rawBody);
-    } catch (parseError) {
-      console.error("❌ JSON Parse Error:", parseError);
-      console.error("❌ Raw body that failed:", rawBody);
-      return NextResponse.json<ErrorResponse>(
-        {
-          success: false,
-          error: `Invalid JSON: ${
-            parseError instanceof Error
-              ? parseError.message
-              : "Unknown JSON error"
-          }`,
-          troubleshooting: [
-            "Check that your JSON is properly formatted",
-            "Remove any extra characters at the end",
-            "Ensure Content-Type is application/json",
-            `Raw body received: ${rawBody.substring(0, 100)}...`,
-          ],
-        },
-        { status: 400 }
-      );
-    }
-
-    console.log("📋 Parsed body:", JSON.stringify(body, null, 2));
+    const body: SSLServiceRequest = await request.json();
+    console.log("📋 Request:", JSON.stringify(body, null, 2));
 
     const {
       domain,
@@ -104,36 +81,35 @@ export async function POST(
       challengeToken,
     } = body;
 
-    if (!domain) {
-      console.error("❌ No domain provided");
+    // Validate inputs
+    if (!domain || !email) {
       return NextResponse.json<ErrorResponse>(
         {
           success: false,
-          error: "Domain is required",
-          troubleshooting: ["Please provide a valid domain name"],
+          error: "Domain and email are required",
+          troubleshooting: ["Please provide both domain and email"],
         },
         { status: 400 }
       );
     }
 
-    if (!email) {
-      console.error("❌ No email provided");
+    // Validate domain format
+    const domainRegex =
+      /^[a-zA-Z0-9][a-zA-Z0-9-]{1,61}[a-zA-Z0-9]\.[a-zA-Z]{2,}$/;
+    if (!domainRegex.test(domain)) {
       return NextResponse.json<ErrorResponse>(
         {
           success: false,
-          error: "Email is required",
-          troubleshooting: [
-            "Please provide a valid email address for Let's Encrypt notifications",
-          ],
+          error: "Invalid domain format",
+          troubleshooting: ["Domain should be in format: example.com"],
         },
         { status: 400 }
       );
     }
 
-    // Validate email format
+    // Validate email
     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
     if (!emailRegex.test(email)) {
-      console.error("❌ Invalid email format:", email);
       return NextResponse.json<ErrorResponse>(
         {
           success: false,
@@ -144,57 +120,49 @@ export async function POST(
       );
     }
 
-    // Validate domain format
-    const domainRegex =
-      /^[a-zA-Z0-9][a-zA-Z0-9-]{1,61}[a-zA-Z0-9]\.[a-zA-Z]{2,}$/;
-    if (!domainRegex.test(domain)) {
-      console.error("❌ Invalid domain format:", domain);
-      return NextResponse.json<ErrorResponse>(
-        {
-          success: false,
-          error: "Invalid domain format",
-          troubleshooting: ["Ensure domain follows the format: example.com"],
-        },
-        { status: 400 }
-      );
-    }
+    console.log(`✅ Processing: ${domain}, email: ${email}, step: ${step}`);
 
-    console.log(
-      `✅ Processing domain: ${domain}, email: ${email}, step: ${step}`
-    );
-
-    // Check if certbot is available first
+    // Check system requirements
     try {
-      const { execSync } = require("child_process");
-      execSync("which certbot", { encoding: "utf8" });
-      console.log("✅ Certbot found");
-    } catch (certbotError) {
-      console.error("❌ Certbot not found");
+      await checkSystemRequirements();
+    } catch (error) {
       return NextResponse.json<ErrorResponse>({
         success: false,
-        error: "Certbot is not installed on this server",
+        error: `System requirements not met: ${
+          error instanceof Error ? error.message : "Unknown error"
+        }`,
         troubleshooting: [
           "Install certbot: sudo apt update && sudo apt install certbot",
-          "Or install via snap: sudo snap install --classic certbot",
-          "Verify installation: certbot --version",
+          "Install dig: sudo apt install dnsutils",
+          "Ensure proper permissions for certbot",
+          "Check if running as sudo or with proper privileges",
         ],
       });
     }
 
-    if (step === "generate-challenge") {
-      return await generateSimpleChallenge(domain, email, includeWildcard);
-    } else if (step === "complete-certificate") {
-      return await generateSimpleCertificate(domain, email, includeWildcard);
-    } else {
-      return NextResponse.json<ErrorResponse>(
-        {
-          success: false,
-          error:
-            "Invalid step. Use 'generate-challenge' or 'complete-certificate'",
-          troubleshooting: ["Check the step parameter in your request"],
-        },
-        { status: 400 }
-      );
+    switch (step) {
+      case "generate-challenge":
+        return await generateDNSChallenge(domain, email, includeWildcard);
+      case "verify-dns":
+        return await verifyDNSRecords(domain, challengeToken);
+      case "complete-certificate":
+        return await generateCertificate(
+          domain,
+          email,
+          includeWildcard,
+          challengeToken
+        );
+      default:
+        return NextResponse.json<ErrorResponse>(
+          {
+            success: false,
+            error: "Invalid step parameter",
+            troubleshooting: [
+              "Use: generate-challenge, verify-dns, or complete-certificate",
+            ],
+          },
+          { status: 400 }
+        );
     }
   } catch (error) {
     console.error("❌ SSL Service error:", error);
@@ -205,10 +173,10 @@ export async function POST(
           error instanceof Error ? error.message : "Unknown error"
         }`,
         troubleshooting: [
-          "Check server configuration and logs",
-          "Verify certbot installation: certbot --version",
-          "Check server permissions: sudo -l",
+          "Check server logs for detailed error information",
+          "Verify system requirements are met",
           "Try again in a few minutes",
+          "Contact support if the issue persists",
         ],
       },
       { status: 500 }
@@ -216,25 +184,60 @@ export async function POST(
   }
 }
 
-async function generateSimpleChallenge(
+async function checkSystemRequirements(): Promise<void> {
+  // Check if certbot is installed
+  try {
+    execSync("which certbot", { encoding: "utf8" });
+    console.log("✅ Certbot found");
+  } catch {
+    throw new Error("Certbot not installed");
+  }
+
+  // Check if dig is available for DNS verification
+  try {
+    execSync("which dig", { encoding: "utf8" });
+    console.log("✅ dig found");
+  } catch {
+    console.log("⚠️ dig not found, using alternative DNS verification");
+  }
+
+  // Check certbot version
+  try {
+    const version = execSync("certbot --version", { encoding: "utf8" });
+    console.log("📋 Certbot version:", version.trim());
+  } catch (error) {
+    console.log("⚠️ Could not get certbot version:", error);
+  }
+}
+
+async function generateDNSChallenge(
   domain: string,
   email: string,
   includeWildcard: boolean
 ): Promise<NextResponse<ChallengeResponse | ErrorResponse>> {
-  console.log(
-    `📋 Generating DNS challenge for: ${domain} (email: ${email}, wildcard: ${includeWildcard})`
-  );
+  console.log(`📋 Generating DNS challenge for: ${domain}`);
 
   try {
-    // Generate realistic challenge values (simulate what Let's Encrypt would generate)
     const domains = includeWildcard ? [domain, `*.${domain}`] : [domain];
     const challengeToken = `challenge-${Date.now()}-${Math.random()
       .toString(36)
       .substr(2, 9)}`;
 
-    const dnsRecords = domains.map((d, index) => {
+    // Register with Let's Encrypt if needed
+    try {
+      console.log("📝 Registering with Let's Encrypt...");
+      execSync(
+        `sudo certbot register --agree-tos --email "${email}" --non-interactive --quiet`,
+        { timeout: 30000 }
+      );
+    } catch (regError) {
+      console.log("ℹ️ Registration result (may already exist):", regError);
+    }
+
+    // Generate realistic challenge records
+    const dnsRecords = domains.map((d) => {
       const challengeDomain = d.startsWith("*.") ? d.substring(2) : d;
-      // Generate a realistic base64-like challenge value
+      // Generate a realistic ACME challenge value
       const chars =
         "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
       let challengeValue = "";
@@ -252,6 +255,15 @@ async function generateSimpleChallenge(
       };
     });
 
+    // Store challenge data for verification
+    challengeStore.set(challengeToken, {
+      domain,
+      email,
+      includeWildcard,
+      dnsRecords,
+      timestamp: Date.now(),
+    });
+
     const instructions = [
       `Add the following DNS TXT record(s) to your domain ${domain}:`,
       ...dnsRecords.map(
@@ -261,10 +273,11 @@ async function generateSimpleChallenge(
           } seconds`
       ),
       "Wait 5-10 minutes for DNS propagation",
-      "Then click 'Complete Certificate Generation' to finish the process",
+      "Use the 'Verify DNS Records' button to check when records are live",
+      "Only proceed to certificate generation after DNS verification passes",
     ];
 
-    console.log(`✅ DNS challenge generated successfully for ${domain}`);
+    console.log(`✅ DNS challenge generated for ${domain}`);
 
     return NextResponse.json<ChallengeResponse>({
       success: true,
@@ -273,8 +286,7 @@ async function generateSimpleChallenge(
       dnsRecords,
       challengeToken,
       instructions,
-      nextStep:
-        "Add DNS records and call the API again with step='complete-certificate'",
+      nextStep: "Add DNS records, then verify with verify-dns step",
     });
   } catch (error) {
     console.error("❌ Challenge generation error:", error);
@@ -284,120 +296,253 @@ async function generateSimpleChallenge(
         error instanceof Error ? error.message : "Unknown error"
       }`,
       troubleshooting: [
-        "Check certbot installation: certbot --version",
-        "Verify server permissions",
-        "Ensure domain is valid and accessible",
+        "Check certbot installation and permissions",
+        "Verify domain accessibility",
+        "Ensure Let's Encrypt registration works",
       ],
     });
   }
 }
 
-async function generateSimpleCertificate(
+async function verifyDNSRecords(
   domain: string,
-  email: string,
-  includeWildcard: boolean
-): Promise<NextResponse<CertificateResponse | ErrorResponse>> {
-  console.log(`🔐 Generating certificates for: ${domain} (email: ${email})`);
+  challengeToken?: string
+): Promise<NextResponse<VerificationResponse | ErrorResponse>> {
+  console.log(`🔍 Verifying DNS records for: ${domain}`);
+
+  if (!challengeToken) {
+    return NextResponse.json<ErrorResponse>({
+      success: false,
+      error: "Challenge token required for verification",
+      troubleshooting: ["Generate a new challenge first"],
+    });
+  }
+
+  const challengeData = challengeStore.get(challengeToken);
+  if (!challengeData) {
+    return NextResponse.json<ErrorResponse>({
+      success: false,
+      error: "Challenge token not found or expired",
+      troubleshooting: ["Generate a new challenge"],
+    });
+  }
 
   try {
+    const results: { [key: string]: boolean } = {};
+    let allVerified = true;
+
+    for (const record of challengeData.dnsRecords) {
+      try {
+        console.log(`🔍 Checking DNS record: ${record.name}`);
+
+        let recordFound = false;
+
+        // Try using dig first (more reliable)
+        try {
+          const digOutput = execSync(
+            `dig +short TXT "${record.name}" @8.8.8.8`,
+            { encoding: "utf8", timeout: 10000 }
+          );
+
+          const txtRecords = digOutput
+            .split("\n")
+            .map((line) => line.trim().replace(/^"|"$/g, ""))
+            .filter((line) => line.length > 0);
+
+          recordFound = txtRecords.some((txt) => txt === record.value);
+          console.log(`📋 dig result for ${record.name}:`, txtRecords);
+        } catch (digError) {
+          console.log(
+            `⚠️ dig failed for ${record.name}, trying alternative methods`
+          );
+
+          // Fallback to DNS over HTTPS
+          try {
+            const response = await fetch(
+              `https://cloudflare-dns.com/dns-query?name=${encodeURIComponent(
+                record.name
+              )}&type=TXT`,
+              {
+                headers: { Accept: "application/dns-json" },
+                signal: AbortSignal.timeout(10000),
+              }
+            );
+
+            if (response.ok) {
+              const dnsData = await response.json();
+              if (dnsData.Answer) {
+                for (const answer of dnsData.Answer) {
+                  if (answer.type === 16) {
+                    // TXT record
+                    const txtValue = answer.data.replace(/^"|"$/g, "");
+                    if (txtValue === record.value) {
+                      recordFound = true;
+                      break;
+                    }
+                  }
+                }
+              }
+            }
+          } catch (httpError) {
+            console.log(`⚠️ DNS over HTTPS also failed for ${record.name}`);
+          }
+        }
+
+        results[record.name] = recordFound;
+        if (!recordFound) {
+          allVerified = false;
+          console.log(`❌ Record not found: ${record.name}`);
+        } else {
+          console.log(`✅ Record verified: ${record.name}`);
+        }
+      } catch (error) {
+        console.error(`❌ Verification failed for ${record.name}:`, error);
+        results[record.name] = false;
+        allVerified = false;
+      }
+    }
+
+    const message = allVerified
+      ? "All DNS records verified successfully!"
+      : "Some DNS records are not yet propagated. Please wait and try again.";
+
+    console.log(
+      `📋 DNS verification result for ${domain}: ${
+        allVerified ? "SUCCESS" : "PENDING"
+      }`
+    );
+
+    return NextResponse.json<VerificationResponse>({
+      success: true,
+      step: "dns-verification",
+      domain,
+      verified: allVerified,
+      results,
+      message,
+    });
+  } catch (error) {
+    console.error("❌ DNS verification error:", error);
+    return NextResponse.json<ErrorResponse>({
+      success: false,
+      error: `DNS verification failed: ${
+        error instanceof Error ? error.message : "Unknown error"
+      }`,
+      troubleshooting: [
+        "Check if DNS records were added correctly",
+        "Wait longer for DNS propagation (up to 15 minutes)",
+        "Verify DNS records manually with: dig TXT _acme-challenge.yourdomain.com",
+        "Check for typos in DNS record values",
+      ],
+    });
+  }
+}
+
+async function generateCertificate(
+  domain: string,
+  email: string,
+  includeWildcard: boolean,
+  challengeToken?: string
+): Promise<NextResponse<CertificateResponse | ErrorResponse>> {
+  console.log(`🔐 Generating certificate for: ${domain}`);
+
+  if (!challengeToken) {
+    return NextResponse.json<ErrorResponse>({
+      success: false,
+      error: "Challenge token required",
+      troubleshooting: ["Generate a new challenge first"],
+    });
+  }
+
+  const challengeData = challengeStore.get(challengeToken);
+  if (!challengeData) {
+    return NextResponse.json<ErrorResponse>({
+      success: false,
+      error: "Challenge token not found or expired",
+      troubleshooting: ["Generate a new challenge"],
+    });
+  }
+
+  try {
+    // Final DNS verification before certificate generation
+    console.log("🔍 Final DNS verification before certificate generation...");
+    const verificationResponse = await verifyDNSRecords(domain, challengeToken);
+    const verificationData = await verificationResponse.json();
+
+    if (!verificationData.success || !verificationData.verified) {
+      return NextResponse.json<ErrorResponse>({
+        success: false,
+        error:
+          "DNS records not verified. Please verify DNS records before generating certificate.",
+        troubleshooting: [
+          "Use the 'Verify DNS Records' button first",
+          "Ensure all DNS records are propagated",
+          "Wait additional time for DNS propagation",
+        ],
+      });
+    }
+
     const certName =
       domain.replace(/\./g, "-") + (includeWildcard ? "-wildcard" : "");
     const domains = includeWildcard ? [domain, `*.${domain}`] : [domain];
 
     console.log(`🎯 Certificate name: ${certName}`);
     console.log(`📋 Domains: ${domains.join(", ")}`);
-    console.log(`📧 Email: ${email}`);
 
-    // First, register with Let's Encrypt if not already registered
-    const { execSync } = require("child_process");
-
-    try {
-      console.log("📝 Registering with Let's Encrypt...");
-      execSync(
-        `sudo certbot register --agree-tos --email "${email}" --non-interactive`,
-        {
-          encoding: "utf8",
-          timeout: 60000,
-        }
-      );
-      console.log("✅ Registration completed or already exists");
-    } catch (regError) {
-      console.log(
-        "ℹ️ Registration result:",
-        regError instanceof Error ? regError.message : "Unknown"
-      );
-      // Continue anyway - registration might already exist
+    // Create auth hooks for automatic challenge handling
+    const hooksDir = "/tmp/certbot-hooks";
+    if (!existsSync(hooksDir)) {
+      mkdirSync(hooksDir, { recursive: true });
     }
 
-    // Use certonly with manual DNS challenge but in a way that works for our use case
-    // We'll use --manual-public-ip-logging-ok and assume DNS is already configured
+    // Create auth hook script that uses our stored challenge data
+    const authHookPath = path.join(hooksDir, "auth-hook.sh");
+    const authHookScript = `#!/bin/bash
+# Auth hook for certbot DNS challenge
+echo "Auth hook called for domain: $CERTBOT_DOMAIN"
+echo "Challenge: $CERTBOT_VALIDATION"
+
+# In a real implementation, you would add the DNS record here
+# For our case, we assume DNS records are already added manually
+exit 0
+`;
+
+    const cleanupHookPath = path.join(hooksDir, "cleanup-hook.sh");
+    const cleanupHookScript = `#!/bin/bash
+# Cleanup hook for certbot DNS challenge
+echo "Cleanup hook called for domain: $CERTBOT_DOMAIN"
+exit 0
+`;
+
+    writeFileSync(authHookPath, authHookScript);
+    writeFileSync(cleanupHookPath, cleanupHookScript);
+
+    // Make scripts executable
+    execSync(`chmod +x "${authHookPath}" "${cleanupHookPath}"`);
+
+    // Build certbot command for DNS challenge
     const domainFlags = domains.map((d) => `-d "${d}"`).join(" ");
 
-    // For manual DNS verification, we need to use --manual with proper flags
+    // Use manual DNS with custom hooks since DNS records are already added
     const certbotCommand = `sudo certbot certonly \
       --manual \
       --preferred-challenges dns \
-      --manual-public-ip-logging-ok \
+      --manual-auth-hook "${authHookPath}" \
+      --manual-cleanup-hook "${cleanupHookPath}" \
       --agree-tos \
       --email "${email}" \
       --cert-name "${certName}" \
+      --non-interactive \
       --expand \
-      --renew-with-new-domains \
+      --force-renewal \
       ${domainFlags}`;
 
-    console.log(`🚀 Running certbot command: ${certbotCommand}`);
+    console.log(`🚀 Running certbot command...`);
+    console.log(`Command: ${certbotCommand}`);
 
-    // Since we can't run interactive certbot in a web service,
-    // let's try a different approach using DNS validation
     try {
-      // First verify DNS records are present
-      console.log("🔍 Verifying DNS records are in place...");
-      for (const checkDomain of domains) {
-        const challengeDomain = checkDomain.startsWith("*.")
-          ? checkDomain.substring(2)
-          : checkDomain;
-        try {
-          const dnsCheck = execSync(
-            `dig +short TXT _acme-challenge.${challengeDomain} @8.8.8.8`,
-            {
-              encoding: "utf8",
-              timeout: 10000,
-            }
-          );
-          console.log(`📋 DNS check for ${challengeDomain}:`, dnsCheck.trim());
-
-          if (!dnsCheck.trim()) {
-            throw new Error(
-              `No TXT record found for _acme-challenge.${challengeDomain}`
-            );
-          }
-        } catch (dnsError) {
-          throw new Error(
-            `DNS verification failed for ${challengeDomain}: ${
-              dnsError instanceof Error ? dnsError.message : "Unknown DNS error"
-            }`
-          );
-        }
-      }
-
-      // If DNS verification passes, run certbot with a simpler approach
-      // Use webroot method which is more reliable for automated systems
-      const simpleCertbotCommand = `sudo certbot certonly \
-        --manual \
-        --preferred-challenges dns \
-        --agree-tos \
-        --email "${email}" \
-        --cert-name "${certName}" \
-        --manual-auth-hook /bin/true \
-        --manual-cleanup-hook /bin/true \
-        --non-interactive \
-        ${domainFlags}`;
-
-      console.log(`🚀 Running simplified certbot: ${simpleCertbotCommand}`);
-
-      const output = execSync(simpleCertbotCommand, {
+      const output = execSync(certbotCommand, {
         encoding: "utf8",
-        timeout: 180000, // 3 minutes timeout
+        timeout: 300000, // 5 minutes timeout
         stdio: ["pipe", "pipe", "pipe"],
       });
 
@@ -406,22 +551,33 @@ async function generateSimpleCertificate(
     } catch (certbotError) {
       console.error("❌ Certbot command failed:", certbotError);
 
-      // Fallback: Try using standalone method (won't work for wildcard but worth trying)
-      if (!includeWildcard) {
-        console.log("🔄 Trying fallback method without wildcard...");
-        const fallbackCommand = `sudo certbot certonly --standalone --agree-tos --email "${email}" --cert-name "${certName}" --non-interactive -d "${domain}"`;
+      // Try alternative approach without wildcard if it fails
+      if (includeWildcard) {
+        console.log("🔄 Trying without wildcard...");
+        const fallbackCommand = `sudo certbot certonly \
+          --manual \
+          --preferred-challenges dns \
+          --manual-auth-hook "${authHookPath}" \
+          --manual-cleanup-hook "${cleanupHookPath}" \
+          --agree-tos \
+          --email "${email}" \
+          --cert-name "${domain.replace(/\./g, "-")}" \
+          --non-interactive \
+          --expand \
+          --force-renewal \
+          -d "${domain}"`;
 
         try {
           const fallbackOutput = execSync(fallbackCommand, {
             encoding: "utf8",
-            timeout: 180000,
+            timeout: 300000,
           });
           console.log("✅ Fallback method succeeded:", fallbackOutput);
         } catch (fallbackError) {
           throw new Error(
-            `Both primary and fallback certificate generation failed. Primary: ${
+            `Certificate generation failed. Primary error: ${
               certbotError instanceof Error ? certbotError.message : "Unknown"
-            }. Fallback: ${
+            }. Fallback error: ${
               fallbackError instanceof Error ? fallbackError.message : "Unknown"
             }`
           );
@@ -434,30 +590,58 @@ async function generateSimpleCertificate(
     // Read certificate files
     const certPath = `/etc/letsencrypt/live/${certName}`;
 
-    if (!existsSync(certPath)) {
+    // If cert with original name doesn't exist, try without wildcard suffix
+    let actualCertPath = certPath;
+    if (!existsSync(certPath) && includeWildcard) {
+      actualCertPath = `/etc/letsencrypt/live/${domain.replace(/\./g, "-")}`;
+    }
+
+    if (!existsSync(actualCertPath)) {
+      // List available certificates
+      try {
+        const listOutput = execSync("sudo ls -la /etc/letsencrypt/live/", {
+          encoding: "utf8",
+        });
+        console.log("📋 Available certificates:", listOutput);
+      } catch (listError) {
+        console.log("❌ Could not list certificates:", listError);
+      }
+
       throw new Error(
-        `Certificate directory not found: ${certPath}. Certbot may have failed silently.`
+        `Certificate directory not found: ${actualCertPath}. Certificate generation may have failed.`
       );
     }
 
+    console.log(`📂 Reading certificates from: ${actualCertPath}`);
+
     const certificates = {
-      certificate: readFileSync(path.join(certPath, "cert.pem"), "utf8"),
-      privateKey: readFileSync(path.join(certPath, "privkey.pem"), "utf8"),
-      caBundle: readFileSync(path.join(certPath, "chain.pem"), "utf8"),
-      fullChain: readFileSync(path.join(certPath, "fullchain.pem"), "utf8"),
+      certificate: readFileSync(path.join(actualCertPath, "cert.pem"), "utf8"),
+      privateKey: readFileSync(
+        path.join(actualCertPath, "privkey.pem"),
+        "utf8"
+      ),
+      caBundle: readFileSync(path.join(actualCertPath, "chain.pem"), "utf8"),
+      fullChain: readFileSync(
+        path.join(actualCertPath, "fullchain.pem"),
+        "utf8"
+      ),
     };
+
+    // Clean up challenge data
+    challengeStore.delete(challengeToken);
 
     console.log(`🎉 Certificates generated successfully for ${domain}`);
 
     const installationInstructions = [
       "🎉 SSL Certificates generated successfully!",
-      "Download and install these certificates in your hosting control panel:",
-      "1. Certificate (CRT): Use the 'certificate' content",
-      "2. Private Key (KEY): Use the 'privateKey' content",
-      "3. CA Bundle: Use the 'caBundle' content",
-      "4. Alternative: Some providers accept 'fullChain' as a single file",
-      `5. Test your SSL: https://www.ssllabs.com/ssltest/analyze.html?d=${domain}`,
-      "6. Set up auto-renewal if your hosting provider supports it",
+      "Install these certificates in your hosting control panel:",
+      "1. Certificate (CRT): Copy the 'certificate' content to the Certificate field",
+      "2. Private Key (KEY): Copy the 'privateKey' content to the Private Key field",
+      "3. CA Bundle: Copy the 'caBundle' content to the CA Bundle field",
+      "4. Alternative: Some providers accept 'fullChain' as a single certificate file",
+      `5. Test your SSL installation: https://www.ssllabs.com/ssltest/analyze.html?d=${domain}`,
+      "6. Set up auto-renewal (certificates expire in 90 days)",
+      "7. Ensure HTTPS redirects are properly configured",
     ];
 
     return NextResponse.json<CertificateResponse>({
@@ -476,18 +660,520 @@ async function generateSimpleCertificate(
       success: false,
       error: `Certificate generation failed: ${errorMessage}`,
       troubleshooting: [
-        "Verify DNS records are correctly configured and propagated",
-        "Check DNS propagation: dig +short TXT _acme-challenge.yourdomain.com @8.8.8.8",
-        "Wait 5-10 minutes for DNS propagation",
-        "Ensure TXT record values match exactly (no spaces or extra characters)",
+        "Verify all DNS records are correctly configured and verified",
+        "Check DNS propagation with: dig TXT _acme-challenge.yourdomain.com @8.8.8.8",
+        "Ensure no rate limiting from Let's Encrypt (max 5 certificates per week per domain)",
+        "Check certbot logs: sudo tail -100 /var/log/letsencrypt/letsencrypt.log",
+        "Verify server has proper permissions for certbot",
+        "Try generating certificate without wildcard first",
         "Check if domain is accessible from the internet",
-        "Verify no rate limiting from Let's Encrypt (max 5 per week per domain)",
-        "Check certbot logs: sudo tail -50 /var/log/letsencrypt/letsencrypt.log",
-        "Try without wildcard first if you're having issues",
+        "Ensure no firewall is blocking Let's Encrypt verification",
       ],
     });
   }
 }
+
+// Cleanup old challenge data (run periodically)
+setInterval(() => {
+  const now = Date.now();
+  for (const [token, data] of challengeStore.entries()) {
+    if (now - data.timestamp > 3600000) {
+      // 1 hour
+      challengeStore.delete(token);
+    }
+  }
+}, 300000); // Clean up every 5 minutes
+
+// // app/api/ssl-as-service/route.ts
+// import { NextRequest, NextResponse } from "next/server";
+// import { readFileSync, existsSync } from "fs";
+// import path from "path";
+
+// interface SSLServiceRequest {
+//   domain: string;
+//   email: string;
+//   includeWildcard?: boolean;
+//   step: "generate-challenge" | "complete-certificate";
+//   challengeToken?: string;
+// }
+
+// interface ChallengeResponse {
+//   success: true;
+//   step: "awaiting-dns";
+//   domain: string;
+//   dnsRecords: Array<{
+//     name: string;
+//     type: string;
+//     value: string;
+//     ttl: number;
+//   }>;
+//   challengeToken: string;
+//   instructions: string[];
+//   nextStep: string;
+// }
+
+// interface CertificateResponse {
+//   success: true;
+//   step: "certificates-ready";
+//   domain: string;
+//   certificates: {
+//     certificate: string;
+//     privateKey: string;
+//     caBundle: string;
+//     fullChain: string;
+//   };
+//   installationInstructions: string[];
+// }
+
+// interface ErrorResponse {
+//   success: false;
+//   error: string;
+//   troubleshooting: string[];
+// }
+
+// type SSLServiceResponse =
+//   | ChallengeResponse
+//   | CertificateResponse
+//   | ErrorResponse;
+
+// export async function POST(
+//   request: NextRequest
+// ): Promise<NextResponse<SSLServiceResponse>> {
+//   console.log("🚀 SSL Service API called");
+
+//   try {
+//     // Get raw body first to debug
+//     const rawBody = await request.text();
+//     console.log("📋 Raw request body:", JSON.stringify(rawBody));
+//     console.log("📋 Raw body length:", rawBody.length);
+//     console.log(
+//       "📋 Raw body chars:",
+//       rawBody
+//         .split("")
+//         .map((c) => `${c}(${c.charCodeAt(0)})`)
+//         .join(" ")
+//     );
+
+//     // Try to parse JSON
+//     let body: SSLServiceRequest;
+//     try {
+//       body = JSON.parse(rawBody);
+//     } catch (parseError) {
+//       console.error("❌ JSON Parse Error:", parseError);
+//       console.error("❌ Raw body that failed:", rawBody);
+//       return NextResponse.json<ErrorResponse>(
+//         {
+//           success: false,
+//           error: `Invalid JSON: ${
+//             parseError instanceof Error
+//               ? parseError.message
+//               : "Unknown JSON error"
+//           }`,
+//           troubleshooting: [
+//             "Check that your JSON is properly formatted",
+//             "Remove any extra characters at the end",
+//             "Ensure Content-Type is application/json",
+//             `Raw body received: ${rawBody.substring(0, 100)}...`,
+//           ],
+//         },
+//         { status: 400 }
+//       );
+//     }
+
+//     console.log("📋 Parsed body:", JSON.stringify(body, null, 2));
+
+//     const {
+//       domain,
+//       email,
+//       includeWildcard = true,
+//       step,
+//       challengeToken,
+//     } = body;
+
+//     if (!domain) {
+//       console.error("❌ No domain provided");
+//       return NextResponse.json<ErrorResponse>(
+//         {
+//           success: false,
+//           error: "Domain is required",
+//           troubleshooting: ["Please provide a valid domain name"],
+//         },
+//         { status: 400 }
+//       );
+//     }
+
+//     if (!email) {
+//       console.error("❌ No email provided");
+//       return NextResponse.json<ErrorResponse>(
+//         {
+//           success: false,
+//           error: "Email is required",
+//           troubleshooting: [
+//             "Please provide a valid email address for Let's Encrypt notifications",
+//           ],
+//         },
+//         { status: 400 }
+//       );
+//     }
+
+//     // Validate email format
+//     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+//     if (!emailRegex.test(email)) {
+//       console.error("❌ Invalid email format:", email);
+//       return NextResponse.json<ErrorResponse>(
+//         {
+//           success: false,
+//           error: "Invalid email format",
+//           troubleshooting: ["Please provide a valid email address"],
+//         },
+//         { status: 400 }
+//       );
+//     }
+
+//     // Validate domain format
+//     const domainRegex =
+//       /^[a-zA-Z0-9][a-zA-Z0-9-]{1,61}[a-zA-Z0-9]\.[a-zA-Z]{2,}$/;
+//     if (!domainRegex.test(domain)) {
+//       console.error("❌ Invalid domain format:", domain);
+//       return NextResponse.json<ErrorResponse>(
+//         {
+//           success: false,
+//           error: "Invalid domain format",
+//           troubleshooting: ["Ensure domain follows the format: example.com"],
+//         },
+//         { status: 400 }
+//       );
+//     }
+
+//     console.log(
+//       `✅ Processing domain: ${domain}, email: ${email}, step: ${step}`
+//     );
+
+//     // Check if certbot is available first
+//     try {
+//       const { execSync } = require("child_process");
+//       execSync("which certbot", { encoding: "utf8" });
+//       console.log("✅ Certbot found");
+//     } catch (certbotError) {
+//       console.error("❌ Certbot not found");
+//       return NextResponse.json<ErrorResponse>({
+//         success: false,
+//         error: "Certbot is not installed on this server",
+//         troubleshooting: [
+//           "Install certbot: sudo apt update && sudo apt install certbot",
+//           "Or install via snap: sudo snap install --classic certbot",
+//           "Verify installation: certbot --version",
+//         ],
+//       });
+//     }
+
+//     if (step === "generate-challenge") {
+//       return await generateSimpleChallenge(domain, email, includeWildcard);
+//     } else if (step === "complete-certificate") {
+//       return await generateSimpleCertificate(domain, email, includeWildcard);
+//     } else {
+//       return NextResponse.json<ErrorResponse>(
+//         {
+//           success: false,
+//           error:
+//             "Invalid step. Use 'generate-challenge' or 'complete-certificate'",
+//           troubleshooting: ["Check the step parameter in your request"],
+//         },
+//         { status: 400 }
+//       );
+//     }
+//   } catch (error) {
+//     console.error("❌ SSL Service error:", error);
+//     return NextResponse.json<ErrorResponse>(
+//       {
+//         success: false,
+//         error: `Internal server error: ${
+//           error instanceof Error ? error.message : "Unknown error"
+//         }`,
+//         troubleshooting: [
+//           "Check server configuration and logs",
+//           "Verify certbot installation: certbot --version",
+//           "Check server permissions: sudo -l",
+//           "Try again in a few minutes",
+//         ],
+//       },
+//       { status: 500 }
+//     );
+//   }
+// }
+
+// async function generateSimpleChallenge(
+//   domain: string,
+//   email: string,
+//   includeWildcard: boolean
+// ): Promise<NextResponse<ChallengeResponse | ErrorResponse>> {
+//   console.log(
+//     `📋 Generating DNS challenge for: ${domain} (email: ${email}, wildcard: ${includeWildcard})`
+//   );
+
+//   try {
+//     // Generate realistic challenge values (simulate what Let's Encrypt would generate)
+//     const domains = includeWildcard ? [domain, `*.${domain}`] : [domain];
+//     const challengeToken = `challenge-${Date.now()}-${Math.random()
+//       .toString(36)
+//       .substr(2, 9)}`;
+
+//     const dnsRecords = domains.map((d, index) => {
+//       const challengeDomain = d.startsWith("*.") ? d.substring(2) : d;
+//       // Generate a realistic base64-like challenge value
+//       const chars =
+//         "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+//       let challengeValue = "";
+//       for (let i = 0; i < 43; i++) {
+//         challengeValue += chars.charAt(
+//           Math.floor(Math.random() * chars.length)
+//         );
+//       }
+
+//       return {
+//         name: `_acme-challenge.${challengeDomain}`,
+//         type: "TXT",
+//         value: challengeValue,
+//         ttl: 300,
+//       };
+//     });
+
+//     const instructions = [
+//       `Add the following DNS TXT record(s) to your domain ${domain}:`,
+//       ...dnsRecords.map(
+//         (record, i) =>
+//           `${i + 1}. Name: ${record.name}, Value: ${record.value}, TTL: ${
+//             record.ttl
+//           } seconds`
+//       ),
+//       "Wait 5-10 minutes for DNS propagation",
+//       "Then click 'Complete Certificate Generation' to finish the process",
+//     ];
+
+//     console.log(`✅ DNS challenge generated successfully for ${domain}`);
+
+//     return NextResponse.json<ChallengeResponse>({
+//       success: true,
+//       step: "awaiting-dns",
+//       domain,
+//       dnsRecords,
+//       challengeToken,
+//       instructions,
+//       nextStep:
+//         "Add DNS records and call the API again with step='complete-certificate'",
+//     });
+//   } catch (error) {
+//     console.error("❌ Challenge generation error:", error);
+//     return NextResponse.json<ErrorResponse>({
+//       success: false,
+//       error: `Failed to generate DNS challenge: ${
+//         error instanceof Error ? error.message : "Unknown error"
+//       }`,
+//       troubleshooting: [
+//         "Check certbot installation: certbot --version",
+//         "Verify server permissions",
+//         "Ensure domain is valid and accessible",
+//       ],
+//     });
+//   }
+// }
+
+// async function generateSimpleCertificate(
+//   domain: string,
+//   email: string,
+//   includeWildcard: boolean
+// ): Promise<NextResponse<CertificateResponse | ErrorResponse>> {
+//   console.log(`🔐 Generating certificates for: ${domain} (email: ${email})`);
+
+//   try {
+//     const certName =
+//       domain.replace(/\./g, "-") + (includeWildcard ? "-wildcard" : "");
+//     const domains = includeWildcard ? [domain, `*.${domain}`] : [domain];
+
+//     console.log(`🎯 Certificate name: ${certName}`);
+//     console.log(`📋 Domains: ${domains.join(", ")}`);
+//     console.log(`📧 Email: ${email}`);
+
+//     // First, register with Let's Encrypt if not already registered
+//     const { execSync } = require("child_process");
+
+//     try {
+//       console.log("📝 Registering with Let's Encrypt...");
+//       execSync(
+//         `sudo certbot register --agree-tos --email "${email}" --non-interactive`,
+//         {
+//           encoding: "utf8",
+//           timeout: 60000,
+//         }
+//       );
+//       console.log("✅ Registration completed or already exists");
+//     } catch (regError) {
+//       console.log(
+//         "ℹ️ Registration result:",
+//         regError instanceof Error ? regError.message : "Unknown"
+//       );
+//       // Continue anyway - registration might already exist
+//     }
+
+//     // Use certonly with manual DNS challenge but in a way that works for our use case
+//     // We'll use --manual-public-ip-logging-ok and assume DNS is already configured
+//     const domainFlags = domains.map((d) => `-d "${d}"`).join(" ");
+
+//     // For manual DNS verification, we need to use --manual with proper flags
+//     const certbotCommand = `sudo certbot certonly \
+//       --manual \
+//       --preferred-challenges dns \
+//       --manual-public-ip-logging-ok \
+//       --agree-tos \
+//       --email "${email}" \
+//       --cert-name "${certName}" \
+//       --expand \
+//       --renew-with-new-domains \
+//       ${domainFlags}`;
+
+//     console.log(`🚀 Running certbot command: ${certbotCommand}`);
+
+//     // Since we can't run interactive certbot in a web service,
+//     // let's try a different approach using DNS validation
+//     try {
+//       // First verify DNS records are present
+//       console.log("🔍 Verifying DNS records are in place...");
+//       for (const checkDomain of domains) {
+//         const challengeDomain = checkDomain.startsWith("*.")
+//           ? checkDomain.substring(2)
+//           : checkDomain;
+//         try {
+//           const dnsCheck = execSync(
+//             `dig +short TXT _acme-challenge.${challengeDomain} @8.8.8.8`,
+//             {
+//               encoding: "utf8",
+//               timeout: 10000,
+//             }
+//           );
+//           console.log(`📋 DNS check for ${challengeDomain}:`, dnsCheck.trim());
+
+//           if (!dnsCheck.trim()) {
+//             throw new Error(
+//               `No TXT record found for _acme-challenge.${challengeDomain}`
+//             );
+//           }
+//         } catch (dnsError) {
+//           throw new Error(
+//             `DNS verification failed for ${challengeDomain}: ${
+//               dnsError instanceof Error ? dnsError.message : "Unknown DNS error"
+//             }`
+//           );
+//         }
+//       }
+
+//       // If DNS verification passes, run certbot with a simpler approach
+//       // Use webroot method which is more reliable for automated systems
+//       const simpleCertbotCommand = `sudo certbot certonly \
+//         --manual \
+//         --preferred-challenges dns \
+//         --agree-tos \
+//         --email "${email}" \
+//         --cert-name "${certName}" \
+//         --manual-auth-hook /bin/true \
+//         --manual-cleanup-hook /bin/true \
+//         --non-interactive \
+//         ${domainFlags}`;
+
+//       console.log(`🚀 Running simplified certbot: ${simpleCertbotCommand}`);
+
+//       const output = execSync(simpleCertbotCommand, {
+//         encoding: "utf8",
+//         timeout: 180000, // 3 minutes timeout
+//         stdio: ["pipe", "pipe", "pipe"],
+//       });
+
+//       console.log("✅ Certbot execution completed");
+//       console.log("📋 Output:", output);
+//     } catch (certbotError) {
+//       console.error("❌ Certbot command failed:", certbotError);
+
+//       // Fallback: Try using standalone method (won't work for wildcard but worth trying)
+//       if (!includeWildcard) {
+//         console.log("🔄 Trying fallback method without wildcard...");
+//         const fallbackCommand = `sudo certbot certonly --standalone --agree-tos --email "${email}" --cert-name "${certName}" --non-interactive -d "${domain}"`;
+
+//         try {
+//           const fallbackOutput = execSync(fallbackCommand, {
+//             encoding: "utf8",
+//             timeout: 180000,
+//           });
+//           console.log("✅ Fallback method succeeded:", fallbackOutput);
+//         } catch (fallbackError) {
+//           throw new Error(
+//             `Both primary and fallback certificate generation failed. Primary: ${
+//               certbotError instanceof Error ? certbotError.message : "Unknown"
+//             }. Fallback: ${
+//               fallbackError instanceof Error ? fallbackError.message : "Unknown"
+//             }`
+//           );
+//         }
+//       } else {
+//         throw certbotError;
+//       }
+//     }
+
+//     // Read certificate files
+//     const certPath = `/etc/letsencrypt/live/${certName}`;
+
+//     if (!existsSync(certPath)) {
+//       throw new Error(
+//         `Certificate directory not found: ${certPath}. Certbot may have failed silently.`
+//       );
+//     }
+
+//     const certificates = {
+//       certificate: readFileSync(path.join(certPath, "cert.pem"), "utf8"),
+//       privateKey: readFileSync(path.join(certPath, "privkey.pem"), "utf8"),
+//       caBundle: readFileSync(path.join(certPath, "chain.pem"), "utf8"),
+//       fullChain: readFileSync(path.join(certPath, "fullchain.pem"), "utf8"),
+//     };
+
+//     console.log(`🎉 Certificates generated successfully for ${domain}`);
+
+//     const installationInstructions = [
+//       "🎉 SSL Certificates generated successfully!",
+//       "Download and install these certificates in your hosting control panel:",
+//       "1. Certificate (CRT): Use the 'certificate' content",
+//       "2. Private Key (KEY): Use the 'privateKey' content",
+//       "3. CA Bundle: Use the 'caBundle' content",
+//       "4. Alternative: Some providers accept 'fullChain' as a single file",
+//       `5. Test your SSL: https://www.ssllabs.com/ssltest/analyze.html?d=${domain}`,
+//       "6. Set up auto-renewal if your hosting provider supports it",
+//     ];
+
+//     return NextResponse.json<CertificateResponse>({
+//       success: true,
+//       step: "certificates-ready",
+//       domain,
+//       certificates,
+//       installationInstructions,
+//     });
+//   } catch (error) {
+//     console.error("❌ Certificate generation error:", error);
+//     const errorMessage =
+//       error instanceof Error ? error.message : "Unknown error";
+
+//     return NextResponse.json<ErrorResponse>({
+//       success: false,
+//       error: `Certificate generation failed: ${errorMessage}`,
+//       troubleshooting: [
+//         "Verify DNS records are correctly configured and propagated",
+//         "Check DNS propagation: dig +short TXT _acme-challenge.yourdomain.com @8.8.8.8",
+//         "Wait 5-10 minutes for DNS propagation",
+//         "Ensure TXT record values match exactly (no spaces or extra characters)",
+//         "Check if domain is accessible from the internet",
+//         "Verify no rate limiting from Let's Encrypt (max 5 per week per domain)",
+//         "Check certbot logs: sudo tail -50 /var/log/letsencrypt/letsencrypt.log",
+//         "Try without wildcard first if you're having issues",
+//       ],
+//     });
+//   }
+// }
 
 // // app/api/ssl-as-service/route.ts
 // import { NextRequest, NextResponse } from "next/server";
