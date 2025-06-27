@@ -307,84 +307,56 @@ async function generateCertificateFixed(
     const certName =
       domain.replace(/\./g, "-") + (includeWildcard ? "-wildcard" : "");
 
-    // FIXED: Use webroot method instead of manual for automation
-    // Create a temporary webroot directory
-    const webrootPath = `/tmp/letsencrypt-webroot-${Date.now()}`;
-    mkdirSync(webrootPath, { recursive: true });
+    // For DNS challenge, we always use manual mode (never standalone)
+    // Create auth hooks for DNS challenge automation
+    const hookDir = "/tmp/certbot-hooks";
+    mkdirSync(hookDir, { recursive: true });
 
-    let certbotCommand;
-    let certificatePath;
-
-    if (includeWildcard) {
-      // For wildcard certificates, we need to use DNS challenge with proper hooks
-      const hookDir = "/tmp/certbot-hooks";
-      mkdirSync(hookDir, { recursive: true });
-
-      // Create a working auth hook that doesn't do anything (DNS already configured)
-      const authHookPath = path.join(hookDir, `auth-${Date.now()}.sh`);
-      writeFileSync(
-        authHookPath,
-        `#!/bin/bash
+    // Create a working auth hook that doesn't do anything (DNS already configured)
+    const authHookPath = path.join(hookDir, `auth-${Date.now()}.sh`);
+    writeFileSync(
+      authHookPath,
+      `#!/bin/bash
 echo "DNS challenge auth hook called for $CERTBOT_DOMAIN"
 echo "Challenge value: $CERTBOT_VALIDATION"
-# DNS records are already configured manually
+# DNS records are already configured manually by the user
 sleep 2
 exit 0
 `
-      );
+    );
 
-      const cleanupHookPath = path.join(hookDir, `cleanup-${Date.now()}.sh`);
-      writeFileSync(
-        cleanupHookPath,
-        `#!/bin/bash
+    const cleanupHookPath = path.join(hookDir, `cleanup-${Date.now()}.sh`);
+    writeFileSync(
+      cleanupHookPath,
+      `#!/bin/bash
 echo "DNS challenge cleanup hook called for $CERTBOT_DOMAIN"
+# No cleanup needed since DNS records were added manually
 exit 0
 `
-      );
+    );
 
-      execSync(`chmod +x "${authHookPath}" "${cleanupHookPath}"`);
+    execSync(`chmod +x "${authHookPath}" "${cleanupHookPath}"`);
 
-      // Use manual with proper hooks for wildcard
-      certbotCommand = `sudo certbot certonly \\
-        --manual \\
-        --preferred-challenges dns \\
-        --manual-auth-hook "${authHookPath}" \\
-        --manual-cleanup-hook "${cleanupHookPath}" \\
-        --agree-tos \\
-        --email "${email}" \\
-        --cert-name "${certName}" \\
-        --non-interactive \\
-        --expand \\
-        --manual-public-ip-logging-ok \\
-        -d "${domain}" -d "*.${domain}"`;
-    } else {
-      // For single domain, try webroot first, then standalone
-      try {
-        // Try webroot method first
-        certbotCommand = `sudo certbot certonly \\
-          --webroot \\
-          --webroot-path "${webrootPath}" \\
-          --agree-tos \\
-          --email "${email}" \\
-          --cert-name "${certName}" \\
-          --non-interactive \\
-          --expand \\
-          -d "${domain}"`;
-      } catch (webrootError) {
-        console.log("⚠️ Webroot failed, trying standalone...");
-        // Fallback to standalone
-        certbotCommand = `sudo certbot certonly \\
-          --standalone \\
-          --agree-tos \\
-          --email "${email}" \\
-          --cert-name "${certName}" \\
-          --non-interactive \\
-          --expand \\
-          -d "${domain}"`;
-      }
-    }
+    // Build domain list
+    const domains = includeWildcard ? [domain, `*.${domain}`] : [domain];
+    const domainFlags = domains.map((d) => `-d "${d}"`).join(" ");
 
-    console.log(`🚀 Running certbot command for ${domain}...`);
+    // ALWAYS use manual DNS challenge (never standalone for DNS challenges)
+    const certbotCommand = `sudo certbot certonly \\
+      --manual \\
+      --preferred-challenges dns \\
+      --manual-auth-hook "${authHookPath}" \\
+      --manual-cleanup-hook "${cleanupHookPath}" \\
+      --agree-tos \\
+      --email "${email}" \\
+      --cert-name "${certName}" \\
+      --non-interactive \\
+      --expand \\
+      --manual-public-ip-logging-ok \\
+      ${domainFlags}`;
+
+    console.log(`🚀 Running DNS challenge certbot command for ${domain}...`);
+    console.log(`Command: ${certbotCommand}`);
 
     try {
       const output = execSync(certbotCommand, {
@@ -396,19 +368,23 @@ exit 0
       console.log("✅ Certbot execution completed");
       console.log("📋 Output snippet:", output.substring(0, 500));
     } catch (certbotError) {
-      console.error("❌ Primary certbot command failed:", certbotError);
+      console.error("❌ Certbot command failed:", certbotError);
 
-      // Enhanced fallback strategy
+      // Enhanced fallback: try without wildcard if wildcard fails
       if (includeWildcard) {
         console.log("🔄 Trying single domain without wildcard...");
         const fallbackCertName = domain.replace(/\./g, "-");
         const fallbackCommand = `sudo certbot certonly \\
-          --standalone \\
+          --manual \\
+          --preferred-challenges dns \\
+          --manual-auth-hook "${authHookPath}" \\
+          --manual-cleanup-hook "${cleanupHookPath}" \\
           --agree-tos \\
           --email "${email}" \\
           --cert-name "${fallbackCertName}" \\
           --non-interactive \\
           --expand \\
+          --manual-public-ip-logging-ok \\
           -d "${domain}"`;
 
         try {
@@ -420,33 +396,42 @@ exit 0
             "✅ Fallback succeeded:",
             fallbackOutput.substring(0, 200)
           );
-          certificatePath = `/etc/letsencrypt/live/${fallbackCertName}`;
+          //   certificatePath = `/etc/letsencrypt/live/${fallbackCertName}`;
         } catch (fallbackError) {
           throw new Error(
-            `Both wildcard and fallback failed: ${fallbackError}`
+            `Both wildcard and single domain DNS challenge failed. Primary error: ${
+              certbotError instanceof Error ? certbotError.message : "Unknown"
+            }. Fallback error: ${
+              fallbackError instanceof Error ? fallbackError.message : "Unknown"
+            }`
           );
         }
       } else {
-        throw certbotError;
+        // For single domain failure, provide detailed error
+        throw new Error(
+          `DNS challenge failed for ${domain}. Error: ${
+            certbotError instanceof Error ? certbotError.message : "Unknown"
+          }`
+        );
       }
     }
+    let certificatePath = `/etc/letsencrypt/live/${certName}`;
+    // Set the certificate path (remove duplicate declaration)
+    certificatePath = `/etc/letsencrypt/live/${certName}`;
 
     // Determine certificate path
-    if (!certificatePath) {
-      certificatePath = `/etc/letsencrypt/live/${certName}`;
 
-      // If original path doesn't exist, try alternatives
-      if (!existsSync(certificatePath)) {
-        const alternatives = [
-          `/etc/letsencrypt/live/${domain.replace(/\./g, "-")}`,
-          `/etc/letsencrypt/live/${domain}`,
-        ];
+    // If original path doesn't exist, try alternatives
+    if (!existsSync(certificatePath)) {
+      const alternatives = [
+        `/etc/letsencrypt/live/${domain.replace(/\./g, "-")}`,
+        `/etc/letsencrypt/live/${domain}`,
+      ];
 
-        for (const altPath of alternatives) {
-          if (existsSync(altPath)) {
-            certificatePath = altPath;
-            break;
-          }
+      for (const altPath of alternatives) {
+        if (existsSync(altPath)) {
+          certificatePath = altPath;
+          break;
         }
       }
     }
