@@ -357,7 +357,218 @@ async function generateACMEChallenge(
     );
   }
 }
+async function verifyDNSRecords(challengeToken: string) {
+  if (!challengeToken) {
+    return NextResponse.json(
+      {
+        success: false,
+        error: "Challenge token is required",
+      },
+      { status: 400 }
+    );
+  }
 
+  const session = await ChallengeSession.findOne({
+    sessionToken: challengeToken,
+  });
+
+  if (!session) {
+    return NextResponse.json(
+      {
+        success: false,
+        error:
+          "Invalid or expired challenge token. Please generate a new certificate request.",
+      },
+      { status: 404 }
+    );
+  }
+
+  session.dnsVerificationAttempts += 1;
+  session.lastDnsCheck = new Date();
+  await session.save();
+
+  const results: { [key: string]: boolean } = {};
+  const foundRecordsMap: { [key: string]: string[] } = {};
+  let allVerified = true;
+
+  console.log(`🔍 Starting DNS verification for ${session.domain}`);
+  console.log(`Attempt #${session.dnsVerificationAttempts}`);
+  console.log(`Wildcard: ${session.includeWildcard ? "Yes" : "No"}`);
+
+  // Group challenges by DNS record name (important for wildcard)
+  const challengesByRecordName: { [key: string]: any[] } = {};
+  for (const challenge of session.challenges) {
+    const recordName = challenge.dnsRecord.name;
+    if (!challengesByRecordName[recordName]) {
+      challengesByRecordName[recordName] = [];
+    }
+    challengesByRecordName[recordName].push(challenge);
+  }
+
+  // Verify each DNS record name
+  for (const [recordName, challenges] of Object.entries(
+    challengesByRecordName
+  )) {
+    console.log(`\nChecking DNS record: ${recordName}`);
+    console.log(`Expected ${challenges.length} value(s) for this record name`);
+
+    const expectedValues = challenges.map((c) => c.dnsRecord.value);
+    console.log(`Expected values:`, expectedValues);
+
+    let foundRecords: string[] = [];
+
+    // Try multiple DNS servers
+    const dnsServers = ["8.8.8.8", "1.1.1.1", "9.9.9.9", "208.67.222.222"];
+
+    for (const server of dnsServers) {
+      try {
+        const resolver = new dns.Resolver();
+        resolver.setServers([server]);
+
+        console.log(`Trying DNS server ${server}...`);
+        const txtRecords = await resolver.resolveTxt(recordName);
+
+        // Flatten the array of arrays that resolveTxt returns
+        const flatRecords = txtRecords.map((chunks) => chunks.join(""));
+        console.log(
+          `Found ${flatRecords.length} TXT record(s) on ${server}:`,
+          flatRecords
+        );
+
+        if (flatRecords.length > 0) {
+          foundRecords = flatRecords;
+          break; // Use the first server that returns records
+        }
+      } catch (error: any) {
+        console.log(
+          `DNS lookup failed on ${server}:`,
+          error.code || error.message
+        );
+      }
+    }
+
+    // Store what we found
+    foundRecordsMap[recordName] = foundRecords;
+
+    // Check if all expected values are present
+    let recordVerified = true;
+    for (const expectedValue of expectedValues) {
+      const found = foundRecords.some(
+        (record) => record.toLowerCase() === expectedValue.toLowerCase()
+      );
+
+      if (!found) {
+        recordVerified = false;
+        console.log(`❌ Expected value not found: ${expectedValue}`);
+      } else {
+        console.log(`✅ Found expected value: ${expectedValue}`);
+      }
+    }
+
+    // Also check for extra records (old challenges)
+    const extraRecords = foundRecords.filter(
+      (record) =>
+        !expectedValues.some(
+          (expected) => expected.toLowerCase() === record.toLowerCase()
+        )
+    );
+
+    if (extraRecords.length > 0) {
+      console.log(
+        `⚠️ Found ${extraRecords.length} extra TXT record(s):`,
+        extraRecords
+      );
+      console.log(
+        `These are likely from old challenges and should be removed!`
+      );
+    }
+
+    // Mark individual challenges as verified
+    for (const challenge of challenges) {
+      const isVerified = foundRecords.some(
+        (record) =>
+          record.toLowerCase() === challenge.dnsRecord.value.toLowerCase()
+      );
+
+      results[
+        `${challenge.domain}:${challenge.dnsRecord.value.substring(0, 10)}...`
+      ] = isVerified;
+
+      if (isVerified) {
+        // Update challenge status in certificate
+        await Certificate.updateOne(
+          {
+            _id: session.certificateId,
+            "challenges.domain": challenge.domain,
+            "challenges.token": challenge.token,
+          },
+          {
+            $set: {
+              "challenges.$.status": "valid",
+              "challenges.$.validatedAt": new Date(),
+            },
+          }
+        );
+      }
+    }
+
+    if (!recordVerified) {
+      allVerified = false;
+    }
+  }
+
+  if (allVerified) {
+    session.dnsVerified = true;
+    await session.save();
+
+    await Certificate.updateOne(
+      { _id: session.certificateId },
+      { status: "validated" }
+    );
+  }
+
+  console.log("\nVerification complete:");
+  console.log("Results:", results);
+  console.log("All verified:", allVerified);
+
+  // Build detailed message
+  let message = "";
+  if (allVerified) {
+    message =
+      "✅ All DNS records verified successfully! You can now generate your certificate.";
+  } else {
+    message = `⏳ DNS verification incomplete (attempt ${session.dnsVerificationAttempts}).\n\n`;
+
+    for (const [recordName, foundRecords] of Object.entries(foundRecordsMap)) {
+      const challenges = challengesByRecordName[recordName];
+      const expectedValues = challenges.map((c) => c.dnsRecord.value);
+
+      message += `For ${recordName}:\n`;
+      message += `- Expected: ${expectedValues.length} record(s)\n`;
+      message += `- Found: ${foundRecords.length} record(s)\n`;
+
+      if (foundRecords.length > expectedValues.length) {
+        message += `- ⚠️ Extra records detected - please remove old TXT records!\n`;
+      }
+      message += "\n";
+    }
+
+    message += "Please ensure:\n";
+    message += "1. You've added ALL the TXT records shown\n";
+    message += "2. You've removed any OLD _acme-challenge records\n";
+    message += "3. DNS has had time to propagate (5-15 minutes)\n";
+  }
+
+  return NextResponse.json({
+    success: true,
+    domain: session.domain,
+    verified: allVerified,
+    results,
+    foundRecords: foundRecordsMap,
+    attempts: session.dnsVerificationAttempts,
+    message,
+  });
+}
 // async function verifyDNSRecords(challengeToken: string) {
 //   if (!challengeToken) {
 //     return NextResponse.json(
@@ -458,212 +669,213 @@ async function generateACMEChallenge(
 //   });
 // }
 
-async function verifyDNSRecords(challengeToken: string) {
-  if (!challengeToken) {
-    return NextResponse.json(
-      {
-        success: false,
-        error: "Challenge token is required",
-      },
-      { status: 400 }
-    );
-  }
+// async function verifyDNSRecords(challengeToken: string) {
+//   if (!challengeToken) {
+//     return NextResponse.json(
+//       {
+//         success: false,
+//         error: "Challenge token is required",
+//       },
+//       { status: 400 }
+//     );
+//   }
 
-  const session = await ChallengeSession.findOne({
-    sessionToken: challengeToken,
-  });
+//   const session = await ChallengeSession.findOne({
+//     sessionToken: challengeToken,
+//   });
 
-  if (!session) {
-    return NextResponse.json(
-      {
-        success: false,
-        error:
-          "Invalid or expired challenge token. Please generate a new certificate request.",
-      },
-      { status: 404 }
-    );
-  }
+//   if (!session) {
+//     return NextResponse.json(
+//       {
+//         success: false,
+//         error:
+//           "Invalid or expired challenge token. Please generate a new certificate request.",
+//       },
+//       { status: 404 }
+//     );
+//   }
 
-  session.dnsVerificationAttempts += 1;
-  session.lastDnsCheck = new Date();
-  await session.save();
+//   session.dnsVerificationAttempts += 1;
+//   session.lastDnsCheck = new Date();
+//   await session.save();
 
-  const results: { [key: string]: boolean } = {};
-  let allVerified = true;
+//   const results: { [key: string]: boolean } = {};
+//   let allVerified = true;
 
-  console.log(`🔍 Starting DNS verification for ${session.domain}`);
-  console.log(`Attempt #${session.dnsVerificationAttempts}`);
+//   console.log(`🔍 Starting DNS verification for ${session.domain}`);
+//   console.log(`Attempt #${session.dnsVerificationAttempts}`);
 
-  for (const challenge of session.challenges) {
-    const recordName = challenge.dnsRecord.name;
-    const expectedValue = challenge.dnsRecord.value;
-    let found = false;
+//   for (const challenge of session.challenges) {
+//     const recordName = challenge.dnsRecord.name;
+//     const expectedValue = challenge.dnsRecord.value;
+//     let found = false;
 
-    console.log(`\nChecking DNS record: ${recordName}`);
-    console.log(`Expected value: ${expectedValue}`);
+//     console.log(`\nChecking DNS record: ${recordName}`);
+//     console.log(`Expected value: ${expectedValue}`);
 
-    // Try multiple methods to resolve DNS
-    // Method 1: Use dns.resolveTxt with multiple DNS servers
-    const dnsServers = ["8.8.8.8", "1.1.1.1", "9.9.9.9", "208.67.222.222"]; // Added OpenDNS
+//     // Try multiple methods to resolve DNS
+//     // Method 1: Use dns.resolveTxt with multiple DNS servers
+//     const dnsServers = ["8.8.8.8", "1.1.1.1", "9.9.9.9", "208.67.222.222"]; // Added OpenDNS
 
-    for (const server of dnsServers) {
-      try {
-        const resolver = new dns.Resolver();
-        resolver.setServers([server]);
+//     for (const server of dnsServers) {
+//       try {
+//         const resolver = new dns.Resolver();
+//         resolver.setServers([server]);
 
-        console.log(`Trying DNS server ${server}...`);
-        const txtRecords = await resolver.resolveTxt(recordName);
+//         console.log(`Trying DNS server ${server}...`);
+//         const txtRecords = await resolver.resolveTxt(recordName);
 
-        // Flatten the array of arrays that resolveTxt returns
-        const flatRecords = txtRecords.map((chunks) => chunks.join(""));
-        console.log(`Found TXT records on ${server}:`, flatRecords);
+//         // Flatten the array of arrays that resolveTxt returns
+//         const flatRecords = txtRecords.map((chunks) => chunks.join(""));
+//         console.log(`Found TXT records on ${server}:`, flatRecords);
 
-        // Check if any record matches (case-insensitive)
-        if (
-          flatRecords.some(
-            (record) => record.toLowerCase() === expectedValue.toLowerCase()
-          )
-        ) {
-          found = true;
-          console.log(`✅ Match found on ${server}!`);
-          break;
-        }
-      } catch (error: any) {
-        console.log(
-          `❌ DNS lookup failed on ${server}:`,
-          error.code || error.message
-        );
-      }
-    }
+//         // Check if any record matches (case-insensitive)
+//         if (
+//           flatRecords.some(
+//             (record) => record.toLowerCase() === expectedValue.toLowerCase()
+//           )
+//         ) {
+//           found = true;
+//           console.log(`✅ Match found on ${server}!`);
+//           break;
+//         }
+//       } catch (error: any) {
+//         console.log(
+//           `❌ DNS lookup failed on ${server}:`,
+//           error.code || error.message
+//         );
+//       }
+//     }
 
-    // Method 2: If not found, try using DNS over HTTPS as fallback
-    if (!found) {
-      console.log("Trying DNS over HTTPS...");
-      try {
-        // Try Cloudflare DNS over HTTPS
-        const cloudflareResponse = await fetch(
-          `https://cloudflare-dns.com/dns-query?name=${encodeURIComponent(
-            recordName
-          )}&type=TXT`,
-          {
-            headers: { Accept: "application/dns-json" },
-          }
-        );
+//     // Method 2: If not found, try using DNS over HTTPS as fallback
+//     if (!found) {
+//       console.log("Trying DNS over HTTPS...");
+//       try {
+//         // Try Cloudflare DNS over HTTPS
+//         const cloudflareResponse = await fetch(
+//           `https://cloudflare-dns.com/dns-query?name=${encodeURIComponent(
+//             recordName
+//           )}&type=TXT`,
+//           {
+//             headers: { Accept: "application/dns-json" },
+//           }
+//         );
 
-        if (cloudflareResponse.ok) {
-          const data = await cloudflareResponse.json();
-          console.log("Cloudflare DNS response:", data);
+//         if (cloudflareResponse.ok) {
+//           const data = await cloudflareResponse.json();
+//           console.log("Cloudflare DNS response:", data);
 
-          if (data.Answer) {
-            for (const answer of data.Answer) {
-              if (answer.type === 16) {
-                // TXT record type
-                // Remove quotes from the data field
-                const txtValue = answer.data.replace(/^"|"$/g, "");
-                console.log(`Found TXT value: ${txtValue}`);
+//           if (data.Answer) {
+//             for (const answer of data.Answer) {
+//               if (answer.type === 16) {
+//                 // TXT record type
+//                 // Remove quotes from the data field
+//                 const txtValue = answer.data.replace(/^"|"$/g, "");
+//                 console.log(`Found TXT value: ${txtValue}`);
 
-                if (txtValue.toLowerCase() === expectedValue.toLowerCase()) {
-                  found = true;
-                  console.log("✅ Match found via Cloudflare DNS!");
-                  break;
-                }
-              }
-            }
-          }
-        }
-      } catch (error) {
-        console.log("Cloudflare DNS over HTTPS failed:", error);
-      }
-    }
+//                 if (txtValue.toLowerCase() === expectedValue.toLowerCase()) {
+//                   found = true;
+//                   console.log("✅ Match found via Cloudflare DNS!");
+//                   break;
+//                 }
+//               }
+//             }
+//           }
+//         }
+//       } catch (error) {
+//         console.log("Cloudflare DNS over HTTPS failed:", error);
+//       }
+//     }
 
-    // Method 3: Try Google DNS over HTTPS
-    if (!found) {
-      console.log("Trying Google DNS over HTTPS...");
-      try {
-        const googleResponse = await fetch(
-          `https://dns.google/resolve?name=${encodeURIComponent(
-            recordName
-          )}&type=TXT`,
-          {
-            headers: { Accept: "application/json" },
-          }
-        );
+//     // Method 3: Try Google DNS over HTTPS
+//     if (!found) {
+//       console.log("Trying Google DNS over HTTPS...");
+//       try {
+//         const googleResponse = await fetch(
+//           `https://dns.google/resolve?name=${encodeURIComponent(
+//             recordName
+//           )}&type=TXT`,
+//           {
+//             headers: { Accept: "application/json" },
+//           }
+//         );
 
-        if (googleResponse.ok) {
-          const data = await googleResponse.json();
-          console.log("Google DNS response:", data);
+//         if (googleResponse.ok) {
+//           const data = await googleResponse.json();
+//           console.log("Google DNS response:", data);
 
-          if (data.Answer) {
-            for (const answer of data.Answer) {
-              if (answer.type === 16) {
-                // TXT record type
-                // Remove quotes from the data field
-                const txtValue = answer.data.replace(/^"|"$/g, "");
-                console.log(`Found TXT value: ${txtValue}`);
+//           if (data.Answer) {
+//             for (const answer of data.Answer) {
+//               if (answer.type === 16) {
+//                 // TXT record type
+//                 // Remove quotes from the data field
+//                 const txtValue = answer.data.replace(/^"|"$/g, "");
+//                 console.log(`Found TXT value: ${txtValue}`);
 
-                if (txtValue.toLowerCase() === expectedValue.toLowerCase()) {
-                  found = true;
-                  console.log("✅ Match found via Google DNS!");
-                  break;
-                }
-              }
-            }
-          }
-        }
-      } catch (error) {
-        console.log("Google DNS over HTTPS failed:", error);
-      }
-    }
+//                 if (txtValue.toLowerCase() === expectedValue.toLowerCase()) {
+//                   found = true;
+//                   console.log("✅ Match found via Google DNS!");
+//                   break;
+//                 }
+//               }
+//             }
+//           }
+//         }
+//       } catch (error) {
+//         console.log("Google DNS over HTTPS failed:", error);
+//       }
+//     }
 
-    results[recordName] = found;
+//     results[recordName] = found;
 
-    if (!found) {
-      allVerified = false;
-      console.log(`❌ Record not found for ${recordName}`);
-    } else {
-      // Update challenge status in certificate
-      await Certificate.updateOne(
-        {
-          _id: session.certificateId,
-          "challenges.domain": challenge.domain,
-        },
-        {
-          $set: {
-            "challenges.$.status": "valid",
-            "challenges.$.validatedAt": new Date(),
-          },
-        }
-      );
-      console.log(`✅ Record verified for ${recordName}`);
-    }
-  }
+//     if (!found) {
+//       allVerified = false;
+//       console.log(`❌ Record not found for ${recordName}`);
+//     } else {
+//       // Update challenge status in certificate
+//       await Certificate.updateOne(
+//         {
+//           _id: session.certificateId,
+//           "challenges.domain": challenge.domain,
+//         },
+//         {
+//           $set: {
+//             "challenges.$.status": "valid",
+//             "challenges.$.validatedAt": new Date(),
+//           },
+//         }
+//       );
+//       console.log(`✅ Record verified for ${recordName}`);
+//     }
+//   }
 
-  if (allVerified) {
-    session.dnsVerified = true;
-    await session.save();
+//   if (allVerified) {
+//     session.dnsVerified = true;
+//     await session.save();
 
-    await Certificate.updateOne(
-      { _id: session.certificateId },
-      { status: "validated" }
-    );
-  }
+//     await Certificate.updateOne(
+//       { _id: session.certificateId },
+//       { status: "validated" }
+//     );
+//   }
 
-  console.log("\nVerification complete:");
-  console.log("Results:", results);
-  console.log("All verified:", allVerified);
+//   console.log("\nVerification complete:");
+//   console.log("Results:", results);
+//   console.log("All verified:", allVerified);
 
-  return NextResponse.json({
-    success: true,
-    domain: session.domain,
-    verified: allVerified,
-    results,
-    attempts: session.dnsVerificationAttempts,
-    message: allVerified
-      ? "✅ All DNS records verified successfully! You can now generate your certificate."
-      : `⏳ DNS records not yet detected. This is attempt ${session.dnsVerificationAttempts}. DNS propagation can take up to 48 hours in some cases, but usually completes within 5-15 minutes. Please ensure the TXT records are added exactly as shown.`,
-  });
-}
-
+//   return NextResponse.json({
+//     success: true,
+//     domain: session.domain,
+//     verified: allVerified,
+//     results,
+//     attempts: session.dnsVerificationAttempts,
+//     message: allVerified
+//       ? "✅ All DNS records verified successfully! You can now generate your certificate."
+//       : `⏳ DNS records not yet detected. This is attempt ${session.dnsVerificationAttempts}. DNS propagation can take up to 48 hours in some cases, but usually completes within 5-15 minutes. Please ensure the TXT records are added exactly as shown.`,
+//   });
+// }
+// Updated completeCertificateGeneration with better DNS validation
+// Updated completeCertificateGeneration with better DNS validation
 async function completeCertificateGeneration(challengeToken: string) {
   if (!challengeToken) {
     return NextResponse.json(
@@ -699,7 +911,6 @@ async function completeCertificateGeneration(challengeToken: string) {
       { status: 404 }
     );
   }
-
   try {
     if (!session.dnsVerified) {
       return NextResponse.json(
@@ -711,100 +922,325 @@ async function completeCertificateGeneration(challengeToken: string) {
       );
     }
 
-    const client = await getAcmeClient();
+    // Check if this challenge was already attempted
+    if (certificate.status === "failed" || certificate.status === "issued") {
+      return NextResponse.json(
+        {
+          success: false,
+          error:
+            "This challenge has already been used. Please generate a new certificate request.",
+        },
+        { status: 400 }
+      );
+    }
 
-    console.log("🔐 Completing ACME challenges...");
+    // IMPORTANT: Do a final DNS check before proceeding
+    console.log("🔍 Final DNS verification before certificate generation...");
 
-    // Complete each challenge
+    // Group challenges by record name for wildcard support
+    const recordsToCheck: { [key: string]: string[] } = {};
+
     for (const challenge of session.challenges) {
+      const recordName = challenge.dnsRecord.name;
+      if (!recordsToCheck[recordName]) {
+        recordsToCheck[recordName] = [];
+      }
+      recordsToCheck[recordName].push(challenge.dnsRecord.value);
+    }
+
+    // Verify DNS one more time using authoritative nameservers
+    for (const [recordName, expectedValues] of Object.entries(recordsToCheck)) {
+      console.log(`\nFinal check for ${recordName}`);
+
+      // Try to get authoritative nameservers for the domain
+      const domain = recordName.replace("_acme-challenge.", "");
+      let authoritativeNS: string[] = [];
+
       try {
-        await client.completeChallenge({
-          url: challenge.url,
-          type: "dns-01", // Fixed: was "http-01"
-          token: challenge.token,
-          status: "pending",
-        });
-        await client.waitForValidStatus({ url: challenge.url });
-        console.log(`✅ Challenge validated for ${challenge.domain}`);
+        const resolver = new dns.Resolver();
+        resolver.setServers(["8.8.8.8"]);
+        const nsRecords = await resolver.resolveNs(domain);
+
+        // Get IPs for nameservers
+        for (const ns of nsRecords.slice(0, 2)) {
+          // Check first 2 nameservers
+          try {
+            const ips = await resolver.resolve4(ns);
+            if (ips.length > 0) {
+              authoritativeNS.push(ips[0]);
+            }
+          } catch {}
+        }
       } catch (error) {
-        console.error(`❌ Challenge failed for ${challenge.domain}:`, error);
+        console.log(
+          "Could not get authoritative nameservers, using public DNS"
+        );
+      }
 
-        certificate.status = "failed";
-        await certificate.save();
+      // Check both authoritative and public DNS
+      const dnsServers = [
+        ...authoritativeNS,
+        "8.8.8.8",
+        "1.1.1.1",
+        "8.8.4.4", // Google Secondary
+        "1.0.0.1", // Cloudflare Secondary
+      ];
 
-        throw new Error(
-          `Challenge validation failed. Please ensure DNS records are correctly configured.`
+      let foundAllValues = false;
+      let foundRecords: string[] = [];
+
+      for (const server of dnsServers) {
+        try {
+          const resolver = new dns.Resolver();
+          resolver.setServers([server]);
+
+          const txtRecords = await resolver.resolveTxt(recordName);
+          const flatRecords = txtRecords.map((chunks) => chunks.join(""));
+
+          console.log(`DNS ${server}: Found ${flatRecords.length} TXT records`);
+
+          // Check if all expected values are present
+          const allPresent = expectedValues.every((expected) =>
+            flatRecords.some((record) => record === expected)
+          );
+
+          if (allPresent) {
+            foundAllValues = true;
+            foundRecords = flatRecords;
+            console.log(`✅ All expected values found on ${server}`);
+            break;
+          }
+        } catch (error) {
+          console.log(`DNS ${server}: No records found`);
+        }
+      }
+
+      if (!foundAllValues) {
+        console.error(`❌ DNS validation failed for ${recordName}`);
+        console.error(`Expected: ${expectedValues.join(", ")}`);
+        console.error(`Found: ${foundRecords.join(", ")}`);
+
+        return NextResponse.json(
+          {
+            success: false,
+            error:
+              "DNS records validation failed. Let's Encrypt may not be able to see your DNS records yet.",
+            details: {
+              recordName,
+              expected: expectedValues,
+              found: foundRecords,
+            },
+            troubleshooting: [
+              "DNS propagation can take longer for some providers (up to 48 hours)",
+              "Try using a different DNS provider if possible",
+              "Ensure records are added to the authoritative nameserver",
+              "Clear DNS cache on your nameservers",
+              "Wait at least 30 minutes before retrying",
+              "Try generating a certificate without wildcard (single domain only)",
+            ],
+          },
+          { status: 400 }
         );
       }
     }
 
-    // Finalize order and get certificate
-    console.log("📝 Finalizing certificate...");
-    const finalizedOrder = await client.finalizeOrder(
-      session.acmeOrder,
-      session.csr
+    console.log(
+      "✅ Final DNS verification passed, proceeding with ACME challenge..."
     );
-    const cert = await client.getCertificate(finalizedOrder);
 
-    // Parse certificate chain
-    const certParts = cert.split(/(?=-----BEGIN CERTIFICATE-----)/g);
-    const mainCert = certParts[0];
-    const caCerts = certParts.slice(1).join("");
+    // Add a delay to ensure global propagation
+    console.log("⏳ Waiting 30 seconds for global DNS propagation...");
+    await new Promise((resolve) => setTimeout(resolve, 30000));
 
-    const certificateData = {
-      certificate: mainCert,
-      privateKey: session.privateKey,
-      caBundle: caCerts,
-      fullChain: cert,
-    };
+    const client = await getAcmeClient();
+    console.log("🔐 Completing ACME challenges...");
 
-    // Update certificate record
-    certificate.status = "issued";
-    certificate.certificateIssued = true;
-    certificate.issuedAt = new Date();
-    certificate.expiresAt = new Date(Date.now() + 90 * 24 * 60 * 60 * 1000);
-    await certificate.save();
+    // Process challenges one by one with better error handling
+    for (const challenge of session.challenges) {
+      try {
+        console.log(`\nProcessing challenge for ${challenge.domain}`);
+        console.log(`Challenge URL: ${challenge.url}`);
 
-    // Clean up session
-    await ChallengeSession.findByIdAndDelete(session._id);
+        // Notify ACME server that we're ready
+        await client.completeChallenge({
+          url: challenge.url,
+          type: "http-01",
+          token: "",
+          status: "pending",
+        });
 
-    console.log(`🎉 Certificate issued for ${session.domain}`);
+        console.log("⏳ Waiting for Let's Encrypt validation...");
 
-    return NextResponse.json({
-      success: true,
-      domain: session.domain,
-      certificates: certificateData,
-      validFor: 90,
-      expiresAt: certificate.expiresAt,
-      message:
-        "🎉 Your free 90-day SSL certificate has been generated successfully!",
-    });
-  } catch (error) {
-    console.error("Certificate generation error:", error);
+        // Wait for validation with longer timeout
+        try {
+          await client.waitForValidStatus({
+            url: challenge.url,
+            interval: 5000, // Check every 5 seconds
+            maxAttempts: 24, // Total 2 minutes
+          });
 
-    certificate.status = "failed";
-    await certificate.save();
+          console.log(`✅ Challenge validated for ${challenge.domain}`);
+        } catch (validationError: any) {
+          console.error(`❌ Validation failed:`, validationError);
 
-    return NextResponse.json(
-      {
-        success: false,
-        error:
-          error instanceof Error
-            ? error.message
-            : "Certificate generation failed",
-        troubleshooting: [
-          "Ensure DNS TXT records are correctly added",
-          "Wait for full DNS propagation (can take up to 15 minutes)",
-          "Check if you've exceeded the weekly limit for this domain",
-          "Try without wildcard if wildcard certificate fails",
-        ],
-      },
-      { status: 500 }
-    );
+          // Try to get more details about the failure
+          if (validationError.message) {
+            console.error(`Error details: ${validationError.message}`);
+          }
+
+          throw validationError;
+        }
+      } finally {
+        return;
+      }
+    }
+  } catch (error: any) {
+    console.log(error);
   }
 }
 
+// async function completeCertificateGeneration(challengeToken: string) {
+//   if (!challengeToken) {
+//     return NextResponse.json(
+//       {
+//         success: false,
+//         error: "Challenge token is required",
+//       },
+//       { status: 400 }
+//     );
+//   }
+
+//   const session = await ChallengeSession.findOne({
+//     sessionToken: challengeToken,
+//   });
+
+//   if (!session) {
+//     return NextResponse.json(
+//       {
+//         success: false,
+//         error: "Invalid or expired challenge token",
+//       },
+//       { status: 404 }
+//     );
+//   }
+
+//   const certificate = await Certificate.findById(session.certificateId);
+//   if (!certificate) {
+//     return NextResponse.json(
+//       {
+//         success: false,
+//         error: "Certificate record not found",
+//       },
+//       { status: 404 }
+//     );
+//   }
+
+//   try {
+//     if (!session.dnsVerified) {
+//       return NextResponse.json(
+//         {
+//           success: false,
+//           error: "DNS records not verified. Please verify DNS records first.",
+//         },
+//         { status: 400 }
+//       );
+//     }
+
+//     const client = await getAcmeClient();
+
+//     console.log("🔐 Completing ACME challenges...");
+
+//     // Complete each challenge
+//     for (const challenge of session.challenges) {
+//       try {
+//         await client.completeChallenge({
+//           url: challenge.url,
+//           type: "dns-01", // Fixed: was "http-01"
+//           token: challenge.token,
+//           status: "pending",
+//         });
+//         await client.waitForValidStatus({ url: challenge.url });
+//         console.log(`✅ Challenge validated for ${challenge.domain}`);
+//       } catch (error) {
+//         console.error(`❌ Challenge failed for ${challenge.domain}:`, error);
+
+//         certificate.status = "failed";
+//         await certificate.save();
+
+//         throw new Error(
+//           `Challenge validation failed. Please ensure DNS records are correctly configured.`
+//         );
+//       }
+//     }
+
+//     // Finalize order and get certificate
+//     console.log("📝 Finalizing certificate...");
+//     const finalizedOrder = await client.finalizeOrder(
+//       session.acmeOrder,
+//       session.csr
+//     );
+//     const cert = await client.getCertificate(finalizedOrder);
+
+//     // Parse certificate chain
+//     const certParts = cert.split(/(?=-----BEGIN CERTIFICATE-----)/g);
+//     const mainCert = certParts[0];
+//     const caCerts = certParts.slice(1).join("");
+
+//     const certificateData = {
+//       certificate: mainCert,
+//       privateKey: session.privateKey,
+//       caBundle: caCerts,
+//       fullChain: cert,
+//     };
+
+//     // Update certificate record
+//     certificate.status = "issued";
+//     certificate.certificateIssued = true;
+//     certificate.issuedAt = new Date();
+//     certificate.expiresAt = new Date(Date.now() + 90 * 24 * 60 * 60 * 1000);
+//     await certificate.save();
+
+//     // Clean up session
+//     await ChallengeSession.findByIdAndDelete(session._id);
+
+//     console.log(`🎉 Certificate issued for ${session.domain}`);
+
+//     return NextResponse.json({
+//       success: true,
+//       domain: session.domain,
+//       certificates: certificateData,
+//       validFor: 90,
+//       expiresAt: certificate.expiresAt,
+//       message:
+//         "🎉 Your free 90-day SSL certificate has been generated successfully!",
+//     });
+//   } catch (error) {
+//     console.error("Certificate generation error:", error);
+
+//     certificate.status = "failed";
+//     await certificate.save();
+
+//     return NextResponse.json(
+//       {
+//         success: false,
+//         error:
+//           error instanceof Error
+//             ? error.message
+//             : "Certificate generation failed",
+//         troubleshooting: [
+//           "Ensure DNS TXT records are correctly added",
+//           "Wait for full DNS propagation (can take up to 15 minutes)",
+//           "Check if you've exceeded the weekly limit for this domain",
+//           "Try without wildcard if wildcard certificate fails",
+//         ],
+//       },
+//       { status: 500 }
+//     );
+//   }
+// }
+
 // Simple GET endpoint for checking certificate status
+
 export async function GET(request: NextRequest) {
   try {
     await connectDB();
