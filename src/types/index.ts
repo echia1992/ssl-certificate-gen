@@ -33,3 +33,4 @@ export enum CertificateStatus {
   SUCCESS = "success",
   ERROR = "error",
 }
+// types/acme-client.d.ts
